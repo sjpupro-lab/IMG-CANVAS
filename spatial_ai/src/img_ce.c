@@ -161,6 +161,11 @@ ImgCEGrid* img_ce_grid_create(void) {
     if (!ce->cells) { free(ce); return NULL; }
     ce->width  = IMG_CE_SIZE;
     ce->height = IMG_CE_SIZE;
+    /* last_delta_id must not default to 0 — that collides with the
+     * first legitimate delta id. Force IMG_DELTA_ID_NONE on every cell. */
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        ce->cells[i].last_delta_id = IMG_DELTA_ID_NONE;
+    }
     return ce;
 }
 
@@ -173,6 +178,9 @@ void img_ce_grid_destroy(ImgCEGrid* ce) {
 void img_ce_grid_clear(ImgCEGrid* ce) {
     if (!ce || !ce->cells) return;
     memset(ce->cells, 0, IMG_CE_TOTAL * sizeof(ImgCECell));
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        ce->cells[i].last_delta_id = IMG_DELTA_ID_NONE;
+    }
 }
 
 /* Pick the majority class in a small per-block histogram (≤ 8 bins). */

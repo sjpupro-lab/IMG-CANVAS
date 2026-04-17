@@ -250,6 +250,8 @@ int main(int argc, char** argv) {
     printf("  resolve_outliers:   %u\n", r.stats.resolve_outliers);
     printf("  resolve_explained:  %u\n", r.stats.resolve_explained);
     printf("  resolve_promoted:   %u\n", r.stats.resolve_promoted);
+    printf("  feedback_success:   %u\n", r.stats.feedback_success);
+    printf("  feedback_failure:   %u\n", r.stats.feedback_failure);
 
     char path[1024];
     int ok_plain = 0, ok_masked = 0;

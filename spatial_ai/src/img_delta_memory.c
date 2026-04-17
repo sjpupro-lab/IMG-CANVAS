@@ -408,6 +408,41 @@ void img_delta_memory_record_usage(ImgDeltaMemory* m,
     if (success) u->success_count++;
 }
 
+void img_delta_memory_ingest_resolve(ImgDeltaMemory* memory,
+                                     const ImgCEGrid* ce,
+                                     const uint8_t* outlier_mask,
+                                     const uint8_t* explained_mask,
+                                     ImgDeltaFeedbackStats* out) {
+    ImgDeltaFeedbackStats local = {0, 0, 0};
+
+    if (memory && ce && ce->cells) {
+        const uint32_t n = ce->width * ce->height;
+        for (uint32_t i = 0; i < n; i++) {
+            const uint32_t id = ce->cells[i].last_delta_id;
+            if (id == IMG_DELTA_ID_NONE) { local.skipped_untouched++; continue; }
+            if (id >= memory->count)     { local.skipped_untouched++; continue; }
+
+            int success = 1;
+            const uint8_t o = outlier_mask   ? outlier_mask[i]   : 0;
+            const uint8_t e = explained_mask ? explained_mask[i] : 0;
+            if (o && !e) success = 0;   /* promoted (unexplained) → failure */
+
+            /* img_delta_apply has already bumped usage_count for every
+             * delta that landed on a cell. Ingest only records the
+             * outcome — success bumps success_count, failure leaves
+             * it alone. */
+            if (success) {
+                memory->units[id].success_count++;
+                local.credited_success++;
+            } else {
+                local.credited_failure++;
+            }
+        }
+    }
+
+    if (out) *out = local;
+}
+
 /* ── Constrained apply ──────────────────────────────────── */
 
 void img_delta_apply(ImgCECell* cell,

@@ -237,6 +237,37 @@ void            img_delta_memory_record_usage(ImgDeltaMemory* m,
                                               uint32_t delta_id,
                                               int success);
 
+/* ── Auto-feedback from resolve ──────────────────────────────
+ *
+ * Walks a CE grid together with resolve's outlier / explained
+ * masks and feeds the outcome of each applied delta back into
+ * DeltaMemory usage / success counters. Outcome rule per cell:
+ *
+ *   last_delta_id == IMG_DELTA_ID_NONE
+ *       → nothing touched this cell; skip.
+ *   outlier_mask[i] == 0
+ *       → cell did not stick out after delta → success.
+ *   outlier_mask[i] == 1 && explained_mask[i] == 1
+ *       → outlier absorbed by resolve (shared role/direction) →
+ *         soft success (the delta was workable and reconciled).
+ *   outlier_mask[i] == 1 && explained_mask[i] == 0
+ *       → outlier promoted; resolve could not explain it → failure.
+ *
+ * Both masks may be NULL (treated as all-zero, i.e. everything is
+ * counted as success). Stats struct is optional. */
+typedef struct {
+    uint32_t credited_success;
+    uint32_t credited_failure;
+    uint32_t skipped_untouched;   /* cells with last_delta_id == NONE */
+} ImgDeltaFeedbackStats;
+
+void            img_delta_memory_ingest_resolve(
+                    ImgDeltaMemory* memory,
+                    const ImgCEGrid* ce,
+                    const uint8_t* outlier_mask_or_null,
+                    const uint8_t* explained_mask_or_null,
+                    ImgDeltaFeedbackStats* out_or_null);
+
 /* Constrained apply (unchanged constraints: dir/depth ±1, role gated). */
 void            img_delta_apply(ImgCECell* cell,
                                 ImgDeltaMemory* m,

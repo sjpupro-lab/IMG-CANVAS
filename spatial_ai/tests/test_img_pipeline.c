@@ -239,6 +239,65 @@ static void test_pipeline_masks_flow_to_render(void) {
     PASS();
 }
 
+/* ── auto feedback closes the loop ───────────────────────── */
+
+static void test_pipeline_feedback_ingests_outcomes(void) {
+    TEST("pipeline feedback=1 bumps memory usage/success after resolve");
+
+    /* Wildcard delta (pre_key=0, L6 match on every cell) so every
+     * frontier step lands a delta and the ingest step has cells to
+     * credit. */
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    ImgDeltaPayload p;
+    memset(&p, 0, sizeof(p));
+    p.state = img_delta_state_simple(IMG_TIER_T1, 2,
+                                     IMG_SIGN_POS, IMG_MODE_INTENSITY);
+    uint32_t id = img_delta_memory_add(mem, 0, p);
+
+    uint8_t* img = make_banded_image(512, 512);
+    ImgPipelineResult r = {0};
+    ImgPipelineOptions opt = img_pipeline_default_options();
+    assert(opt.feedback == 1);   /* default is on */
+    assert(img_pipeline_run(img, 512, 512, mem, &opt, &r));
+
+    /* expansions happened → feedback should have credited them. */
+    assert(r.stats.expansions > 0);
+    assert(r.stats.feedback_success + r.stats.feedback_failure
+           == r.stats.expansions);
+    /* At least some credits landed. */
+    assert(r.stats.feedback_success + r.stats.feedback_failure > 0);
+
+    /* The single stored delta should have usage_count == expansions
+     * (every expansion credited to it, whether success or failure). */
+    assert(img_delta_memory_get(mem, id)->usage_count == r.stats.expansions);
+
+    /* Running again with feedback=0 must NOT bump counts further. */
+    uint32_t before_usage = img_delta_memory_get(mem, id)->usage_count;
+    uint32_t before_success = img_delta_memory_get(mem, id)->success_count;
+
+    ImgPipelineResult r2 = {0};
+    ImgPipelineOptions opt_nofb = img_pipeline_default_options();
+    opt_nofb.feedback = 0;
+    assert(img_pipeline_run(img, 512, 512, mem, &opt_nofb, &r2));
+    assert(r2.stats.feedback_success == 0);
+    assert(r2.stats.feedback_failure == 0);
+
+    /* With feedback off, usage shouldn't change — except for the
+     * per-apply bump inside img_delta_apply itself, which still
+     * counts every apply. Expected net change: +expansions usage,
+     * +0 success. */
+    uint32_t after_usage = img_delta_memory_get(mem, id)->usage_count;
+    uint32_t after_success = img_delta_memory_get(mem, id)->success_count;
+    assert(after_usage   == before_usage + r2.stats.expansions);
+    assert(after_success == before_success);
+
+    img_pipeline_result_destroy(&r2);
+    img_pipeline_result_destroy(&r);
+    img_delta_memory_destroy(mem);
+    free(img);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_pipeline ===\n");
 
@@ -248,6 +307,7 @@ int main(void) {
     test_pipeline_then_render();
     test_destroy_zero_init_safe();
     test_pipeline_masks_flow_to_render();
+    test_pipeline_feedback_ingests_outcomes();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

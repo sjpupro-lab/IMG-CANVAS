@@ -11,6 +11,7 @@ ImgPipelineOptions img_pipeline_default_options(void) {
     o.expansion_steps   = 4;
     o.frontier_max      = 1024;
     o.resolve_threshold = 40;
+    o.feedback          = 1;        /* auto-ingest resolve outcomes */
     return o;
 }
 
@@ -160,6 +161,14 @@ int img_pipeline_run(const uint8_t* image_rgb,
     img_ce_resolve(ce, opt.resolve_threshold,
                    outlier_mask, explained_mask, &rr);
 
+    /* Stage 6: auto-feedback — credit each applied delta's outcome. */
+    ImgDeltaFeedbackStats fb = {0, 0, 0};
+    if (memory && opt.feedback) {
+        img_delta_memory_ingest_resolve(memory, ce,
+                                        outlier_mask, explained_mask,
+                                        &fb);
+    }
+
     out->small_canvas             = sc;
     out->ce_grid                  = ce;
     out->outlier_mask             = outlier_mask;
@@ -170,6 +179,8 @@ int img_pipeline_run(const uint8_t* image_rgb,
     out->stats.resolve_outliers   = rr.outlier_count;
     out->stats.resolve_explained  = rr.explained_count;
     out->stats.resolve_promoted   = rr.promoted_count;
+    out->stats.feedback_success   = fb.credited_success;
+    out->stats.feedback_failure   = fb.credited_failure;
 
     return 1;
 }

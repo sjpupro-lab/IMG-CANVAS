@@ -31,6 +31,10 @@ typedef struct {
     uint32_t expansion_steps;    /* max BFS rounds (0 disables expand) */
     uint32_t frontier_max;       /* cap per BFS round */
     int      resolve_threshold;  /* core-diff threshold for §14.4     */
+    int      feedback;           /* 1 → after resolve, auto-ingest each
+                                  *     applied delta's outcome into
+                                  *     memory usage/success (default 1)
+                                  * 0 → skip the ingest step */
 } ImgPipelineOptions;
 
 typedef struct {
@@ -40,6 +44,8 @@ typedef struct {
     uint32_t resolve_outliers;
     uint32_t resolve_explained;
     uint32_t resolve_promoted;
+    uint32_t feedback_success;   /* deltas credited as success */
+    uint32_t feedback_failure;   /* deltas credited as failure */
 } ImgPipelineStats;
 
 typedef struct {

@@ -599,6 +599,87 @@ static void test_baked_tables_match_compute(void) {
     PASS();
 }
 
+/* ── ingest_resolve: clean / absorbed / promoted outcomes ── */
+
+static void test_ingest_resolve_outcomes(void) {
+    TEST("ingest_resolve credits success/failure per outlier mask");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    /* Two distinct deltas so we can tell their feedback apart. */
+    ImgDeltaPayload p1 = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS, IMG_MODE_INTENSITY);
+    ImgDeltaPayload p2 = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_LINK);
+    uint32_t id_ok      = img_delta_memory_add(m, 0, p1);
+    uint32_t id_bad     = img_delta_memory_add(m, 0, p2);
+    uint32_t id_absorbed = img_delta_memory_add(m, 0, p1);
+
+    /* Fake a CE grid: 3 cells, each credited to a different delta.
+     * We only care about last_delta_id + outlier/explained masks. */
+    ImgCEGrid* ce = img_ce_grid_create();
+    ce->cells[img_ce_idx(0, 0)].last_delta_id = id_ok;       /* clean */
+    ce->cells[img_ce_idx(0, 1)].last_delta_id = id_bad;      /* promoted */
+    ce->cells[img_ce_idx(0, 2)].last_delta_id = id_absorbed; /* explained */
+
+    uint8_t outlier  [IMG_CE_TOTAL] = {0};
+    uint8_t explained[IMG_CE_TOTAL] = {0};
+    outlier  [img_ce_idx(0, 1)] = 1;                          /* outlier, NOT explained → fail */
+    outlier  [img_ce_idx(0, 2)] = 1;
+    explained[img_ce_idx(0, 2)] = 1;                          /* outlier, explained → success */
+
+    ImgDeltaFeedbackStats fb = {0, 0, 0};
+    img_delta_memory_ingest_resolve(m, ce, outlier, explained, &fb);
+
+    /* Counts: 2 successes (clean + absorbed), 1 failure, rest skipped. */
+    assert(fb.credited_success == 2);
+    assert(fb.credited_failure == 1);
+    assert(fb.skipped_untouched == IMG_CE_TOTAL - 3);
+
+    /* Per-unit bookkeeping: ingest does NOT touch usage_count
+     * (img_delta_apply already owns that bump); it only records
+     * the outcome into success_count when success. */
+    assert(img_delta_memory_get(m, id_ok)->usage_count       == 0);
+    assert(img_delta_memory_get(m, id_ok)->success_count     == 1);
+    assert(img_delta_memory_get(m, id_bad)->usage_count      == 0);
+    assert(img_delta_memory_get(m, id_bad)->success_count    == 0);
+    assert(img_delta_memory_get(m, id_absorbed)->usage_count == 0);
+    assert(img_delta_memory_get(m, id_absorbed)->success_count == 1);
+
+    img_ce_grid_destroy(ce);
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
+/* ── ingest_resolve: IMG_DELTA_ID_NONE cells do nothing ── */
+
+static void test_ingest_resolve_skips_untouched(void) {
+    TEST("cells with last_delta_id == NONE contribute only to skipped_untouched");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS, IMG_MODE_INTENSITY);
+    uint32_t id = img_delta_memory_add(m, 0, p);
+
+    ImgCEGrid* ce = img_ce_grid_create();
+    /* All cells default last_delta_id == IMG_DELTA_ID_NONE (set by
+     * img_small_canvas_to_ce, but a fresh-allocated grid has zeros —
+     * force it explicitly for this test). */
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        ce->cells[i].last_delta_id = IMG_DELTA_ID_NONE;
+    }
+
+    ImgDeltaFeedbackStats fb = {0, 0, 0};
+    img_delta_memory_ingest_resolve(m, ce, NULL, NULL, &fb);
+
+    assert(fb.credited_success  == 0);
+    assert(fb.credited_failure  == 0);
+    assert(fb.skipped_untouched == IMG_CE_TOTAL);
+
+    /* The delta was never credited. */
+    assert(img_delta_memory_get(m, id)->usage_count == 0);
+
+    img_ce_grid_destroy(ce);
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -621,6 +702,10 @@ int main(void) {
 
     /* Pre-baked tables */
     test_baked_tables_match_compute();
+
+    /* Auto feedback from resolve */
+    test_ingest_resolve_outcomes();
+    test_ingest_resolve_skips_untouched();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;
