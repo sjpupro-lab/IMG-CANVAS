@@ -21,11 +21,12 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/img_delta_memory.c \
        $(SRC_DIR)/img_delta_compute.c \
        $(SRC_DIR)/img_delta_tables_data.c \
-       $(SRC_DIR)/img_set16.c
+       $(SRC_DIR)/img_set16.c \
+       $(SRC_DIR)/img_render.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render
 
 .PHONY: all clean test
 
@@ -91,6 +92,9 @@ $(BUILD_DIR)/test_img_delta_memory: $(TEST_DIR)/test_img_delta_memory.c $(OBJS) 
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_img_set16: $(TEST_DIR)/test_img_set16.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_render: $(TEST_DIR)/test_img_render.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── CE delta tables: offline generator + baked data ─────────
