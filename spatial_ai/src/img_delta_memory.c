@@ -151,30 +151,178 @@ static const ImgStateKey FALLBACK_MASKS[FALLBACK_LEVELS] = {
     /* L6 */ 0
 };
 
-/* ── Interpretation (Phase A: runtime; Phase B: lookup tables) ──
+/* ── Interpretation: pure SoA lookup (SPEC §13.2) ──────────
  *
- * Resolves one bounded DeltaState against a cell into a concrete
- * output delta. Only one mode is active per delta, matching "단일
- * resume code = 단일 상태" (SPEC §2.2, §9). To compose effects,
- * callers stack multiple deltas.
+ * One bounded DeltaState, expanded via precomputed tables keyed by
+ *   (mode, tier, scale, sign, tone, depth)
+ * into channel values and a packed pattern byte that drives the
+ * tag-override flags. Direction / depth step-clamps come from tiny
+ * side tables indexed by (current_class, sign).
+ *
+ * Each channel table is a flat int16 array of TABLE_N entries. The
+ * pattern table is uint8 per entry, storing which overrides fire
+ * and in what direction:
+ *   bits 0..1  direction_sign   (0 none, 1 POS, 2 NEG)
+ *   bits 2..3  depth_sign       (same)
+ *   bits 4..5  mood_sign_fire   (0 none, 1 POS, 2 NEG)
+ *   bits 6..7  role_flag        (0 none, 1 promote UNKNOWN→OBJECT,
+ *                                2 demote → UNKNOWN)
+ *
+ * Layout index (LSB→MSB order in the flat array):
+ *   idx = mode
+ *       + tier  × MODE_MAX
+ *       + scale × MODE_MAX × TIER_MAX
+ *       + sign  × MODE_MAX × TIER_MAX × SCALE_MAX
+ *       + tone  × …
+ *       + depth × …
  */
 
-static inline int sign_signed(uint8_t sign) {
-    switch (sign) {
-        case IMG_SIGN_POS: return +1;
-        case IMG_SIGN_NEG: return -1;
-        default:           return  0;
+#define IMG_TONE_BUCKETS   3
+#define IMG_DEPTH_BUCKETS  3
+
+#define IMG_DELTA_TABLE_N  (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * \
+                            IMG_SIGN_MAX * IMG_TONE_BUCKETS *            \
+                            IMG_DEPTH_BUCKETS)
+
+static int16_t  g_core_table    [IMG_DELTA_TABLE_N];
+static int16_t  g_link_table    [IMG_DELTA_TABLE_N];
+static int16_t  g_delta_table   [IMG_DELTA_TABLE_N];
+static int16_t  g_priority_table[IMG_DELTA_TABLE_N];
+static uint8_t  g_pattern_table [IMG_DELTA_TABLE_N];
+
+/* Side tables for ±1 clamped steps. Size is small enough to sit
+ * comfortably in L1. */
+#define IMG_FLOW_BUCKETS   5   /* FLOW_NONE..DIAGONAL_DOWN */
+static uint8_t g_direction_step[IMG_FLOW_BUCKETS][IMG_SIGN_MAX];
+static uint8_t g_depth_step    [IMG_DEPTH_BUCKETS][IMG_SIGN_MAX];
+
+static int g_tables_ready = 0;
+
+static inline size_t img_delta_table_idx(uint8_t mode, uint8_t tier,
+                                         uint8_t scale, uint8_t sign,
+                                         uint8_t tone, uint8_t depth) {
+    return (size_t)mode
+         + (size_t)tier  * IMG_MODE_MAX
+         + (size_t)scale * (IMG_MODE_MAX * IMG_TIER_MAX)
+         + (size_t)sign  * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX)
+         + (size_t)tone  * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * IMG_SIGN_MAX)
+         + (size_t)depth * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * IMG_SIGN_MAX * IMG_TONE_BUCKETS);
+}
+
+/* Tier base magnitudes (SPEC §10: T1 fine / T2 mid / T3 structure). */
+static const int TIER_MAGNITUDE[IMG_TIER_MAX] = { 0, 4, 12, 24 };
+/* Per-bucket multipliers used when mode + bucket interact. */
+static const int TONE_MULT_INTENSITY [IMG_TONE_BUCKETS ] = { 12,  6,  3 };
+static const int DEPTH_MULT_PRIORITY [IMG_DEPTH_BUCKETS] = {  3,  6, 10 };
+
+static void build_step_tables(void) {
+    for (int d = 0; d < IMG_FLOW_BUCKETS; d++) {
+        for (int s = 0; s < IMG_SIGN_MAX; s++) {
+            int up = d + 1, down = d - 1;
+            if (up   > IMG_FLOW_DIAGONAL_DOWN) up   = IMG_FLOW_DIAGONAL_DOWN;
+            if (down < 0)                      down = 0;
+            if (s == IMG_SIGN_POS)       g_direction_step[d][s] = (uint8_t)up;
+            else if (s == IMG_SIGN_NEG)  g_direction_step[d][s] = (uint8_t)down;
+            else                         g_direction_step[d][s] = (uint8_t)d;
+        }
+    }
+    for (int d = 0; d < IMG_DEPTH_BUCKETS; d++) {
+        for (int s = 0; s < IMG_SIGN_MAX; s++) {
+            int up = d + 1, down = d - 1;
+            if (up   > IMG_DEPTH_FOREGROUND) up   = IMG_DEPTH_FOREGROUND;
+            if (down < 0)                    down = 0;
+            if (s == IMG_SIGN_POS)       g_depth_step[d][s] = (uint8_t)up;
+            else if (s == IMG_SIGN_NEG)  g_depth_step[d][s] = (uint8_t)down;
+            else                         g_depth_step[d][s] = (uint8_t)d;
+        }
     }
 }
 
-/* Tier → base magnitude (T1 fine, T2 mid, T3 structure). */
-static const int TIER_MAGNITUDE[IMG_TIER_MAX] = { 0, 4, 12, 24 };
+static void build_main_tables(void) {
+    for (uint8_t mode = 0; mode < IMG_MODE_MAX; mode++) {
+        for (uint8_t tier = 0; tier < IMG_TIER_MAX; tier++) {
+            for (uint8_t scale = 0; scale < IMG_SCALE_MAX; scale++) {
+                for (uint8_t sign = 0; sign < IMG_SIGN_MAX; sign++) {
+                    for (uint8_t tone = 0; tone < IMG_TONE_BUCKETS; tone++) {
+                        for (uint8_t depth = 0; depth < IMG_DEPTH_BUCKETS; depth++) {
+                            size_t idx = img_delta_table_idx(mode, tier, scale,
+                                                             sign, tone, depth);
 
-/* Tone multiplier for INTENSITY mode (dark cells amplify). */
-static const int TONE_MULT_INTENSITY[3] = { 12, 6, 3 };  /* DARK, MID, BRIGHT scaled×4 below */
+                            int16_t core = 0, link = 0, dch = 0, prio = 0;
+                            uint8_t pat  = 0;
 
-/* Depth multiplier for PRIORITY mode (foreground absorbs more). */
-static const int DEPTH_MULT_PRIORITY[3] = { 3, 6, 10 };  /* BG, MID, FG scaled×4 below */
+                            int sgn = (sign == IMG_SIGN_POS) ? +1
+                                    : (sign == IMG_SIGN_NEG) ? -1 : 0;
+
+                            if (tier != 0 && sgn != 0 && mode != IMG_MODE_NONE) {
+                                int base = TIER_MAGNITUDE[tier] * (2 + scale) / 2;
+
+                                switch (mode) {
+                                    case IMG_MODE_INTENSITY:
+                                        core = (int16_t)clamp_i(
+                                            sgn * base * TONE_MULT_INTENSITY[tone] / 4,
+                                            -200, 200);
+                                        break;
+                                    case IMG_MODE_LINK:
+                                        link = (int16_t)clamp_i(sgn * base, -120, 120);
+                                        break;
+                                    case IMG_MODE_PRIORITY:
+                                        prio = (int16_t)clamp_i(
+                                            sgn * base * DEPTH_MULT_PRIORITY[depth] / 4,
+                                            -200, 200);
+                                        break;
+                                    case IMG_MODE_MOOD:
+                                        dch = (int16_t)clamp_i(sgn * base, -120, 120);
+                                        /* mood_sign_fire bits 4..5 */
+                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 4);
+                                        break;
+                                    case IMG_MODE_DIRECTION:
+                                        /* direction_sign bits 0..1 */
+                                        pat |= (uint8_t)(sgn > 0 ? 1u : 2u);
+                                        break;
+                                    case IMG_MODE_DEPTH:
+                                        /* depth_sign bits 2..3 */
+                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 2);
+                                        break;
+                                    case IMG_MODE_ROLE:
+                                        /* role_flag bits 6..7 */
+                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 6);
+                                        break;
+                                    default:
+                                        break;
+                                }
+                            }
+
+                            g_core_table    [idx] = core;
+                            g_link_table    [idx] = link;
+                            g_delta_table   [idx] = dch;
+                            g_priority_table[idx] = prio;
+                            g_pattern_table [idx] = pat;
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+void img_delta_tables_init(void) {
+    if (g_tables_ready) return;
+    build_step_tables();
+    build_main_tables();
+    g_tables_ready = 1;
+}
+
+uint32_t img_delta_tables_entry_count(void) {
+    return (uint32_t)IMG_DELTA_TABLE_N;
+}
+
+uint32_t img_delta_tables_memory_bytes(void) {
+    return (uint32_t)(sizeof(g_core_table)     + sizeof(g_link_table)
+                    + sizeof(g_delta_table)    + sizeof(g_priority_table)
+                    + sizeof(g_pattern_table)  + sizeof(g_direction_step)
+                    + sizeof(g_depth_step));
+}
 
 void img_delta_interpret(const ImgCECell* cell,
                          const ImgDeltaPayload* payload,
@@ -182,81 +330,63 @@ void img_delta_interpret(const ImgCECell* cell,
     if (!out) return;
     memset(out, 0, sizeof(*out));
     if (!cell || !payload) return;
+    img_delta_tables_init();
 
     const ImgDeltaState s = payload->state;
-    const int    sign  = sign_signed(img_delta_state_sign(s));
-    const int    tier  = img_delta_state_tier(s);
-    const int    scale = img_delta_state_scale(s);  /* 0..7 */
-    const int    mode  = img_delta_state_mode(s);
+    const uint8_t mode  = img_delta_state_mode(s);
+    const uint8_t tier  = img_delta_state_tier(s);
+    const uint8_t scale = img_delta_state_scale(s);
+    const uint8_t sign  = img_delta_state_sign(s);
 
-    if (tier == 0 || sign == 0 || mode == IMG_MODE_NONE) {
-        /* Zero-state: no effect, but still consume the apply step
-         * (e.g. tick progress only). */
-        return;
+    uint8_t tone  = (cell->tone_class  < IMG_TONE_BUCKETS)  ? cell->tone_class  : IMG_TONE_MID;
+    uint8_t depth = (cell->depth_class < IMG_DEPTH_BUCKETS) ? cell->depth_class : IMG_DEPTH_MIDGROUND;
+
+    const size_t idx = img_delta_table_idx(mode, tier, scale, sign, tone, depth);
+
+    out->add_core     = g_core_table    [idx];
+    out->add_link     = g_link_table    [idx];
+    out->add_delta    = g_delta_table   [idx];
+    out->add_priority = g_priority_table[idx];
+
+    const uint8_t pat = g_pattern_table[idx];
+    const uint8_t dir_sign  = (uint8_t)( pat       & 0x3);
+    const uint8_t dep_sign  = (uint8_t)((pat >> 2) & 0x3);
+    const uint8_t mood_sign = (uint8_t)((pat >> 4) & 0x3);
+    const uint8_t role_flag = (uint8_t)((pat >> 6) & 0x3);
+
+    if (dir_sign) {
+        uint8_t cur_dir = (cell->direction_class < IMG_FLOW_BUCKETS)
+                        ? cell->direction_class : 0;
+        out->direction_override    = g_direction_step[cur_dir][dir_sign];
+        out->direction_override_on = 1;
     }
 
-    /* Base magnitude: tier × (1 + scale/2). Integer only. */
-    const int base = TIER_MAGNITUDE[tier] * (2 + scale) / 2;
+    if (dep_sign) {
+        out->depth_override    = g_depth_step[depth][dep_sign];
+        out->depth_override_on = 1;
+    }
 
-    switch (mode) {
-        case IMG_MODE_INTENSITY: {
-            int tm = TONE_MULT_INTENSITY[
-                cell->tone_class < 3 ? cell->tone_class : 1];
-            out->add_core = (int16_t)clamp_i(sign * base * tm / 4,
-                                             -200, 200);
-            break;
-        }
-        case IMG_MODE_LINK: {
-            out->add_link = (int16_t)clamp_i(sign * base, -120, 120);
-            break;
-        }
-        case IMG_MODE_PRIORITY: {
-            int dm = DEPTH_MULT_PRIORITY[
-                cell->depth_class < 3 ? cell->depth_class : 1];
-            out->add_priority = (int16_t)clamp_i(sign * base * dm / 4,
-                                                 -200, 200);
-            break;
-        }
-        case IMG_MODE_MOOD: {
-            out->add_delta = (int16_t)clamp_i(sign * base, -120, 120);
-            out->delta_sign_override    = (sign > 0) ? IMG_DELTA_POSITIVE
-                                                     : IMG_DELTA_NEGATIVE;
-            out->delta_sign_override_on = 1;
-            break;
-        }
-        case IMG_MODE_DIRECTION: {
-            int step = (sign > 0) ? 1 : -1;
-            int d    = (int)cell->direction_class + step;
-            if (d < 0) d = 0;
-            if (d > IMG_FLOW_DIAGONAL_DOWN) d = IMG_FLOW_DIAGONAL_DOWN;
-            out->direction_override    = (uint8_t)d;
-            out->direction_override_on = 1;
-            break;
-        }
-        case IMG_MODE_DEPTH: {
-            int step = (sign > 0) ? 1 : -1;
-            int d    = (int)cell->depth_class + step;
-            if (d < 0) d = 0;
-            if (d > IMG_DEPTH_FOREGROUND) d = IMG_DEPTH_FOREGROUND;
-            out->depth_override    = (uint8_t)d;
-            out->depth_override_on = 1;
-            break;
-        }
-        case IMG_MODE_ROLE: {
-            if (payload->role_target_on) {
-                out->semantic_override    = payload->role_target;
-                out->semantic_override_on = 1;
-            } else if (sign > 0 && cell->semantic_role == IMG_ROLE_UNKNOWN) {
-                out->semantic_override    = IMG_ROLE_OBJECT;
-                out->semantic_override_on = 1;
-            } else if (sign < 0) {
-                out->semantic_override    = IMG_ROLE_UNKNOWN;
-                out->semantic_override_on = 1;
-            }
-            break;
-        }
-        default:
-            break;
+    if (mood_sign) {
+        out->delta_sign_override    = (mood_sign == 1) ? IMG_DELTA_POSITIVE
+                                                       : IMG_DELTA_NEGATIVE;
+        out->delta_sign_override_on = 1;
+    }
+
+    /* role_flag=1 promotes UNKNOWN→OBJECT; role_flag=2 demotes any→UNKNOWN.
+     * The apply step additionally gates this unless role_target_on is set. */
+    if (role_flag == 1 && cell->semantic_role == IMG_ROLE_UNKNOWN) {
+        out->semantic_override    = IMG_ROLE_OBJECT;
+        out->semantic_override_on = 1;
+    } else if (role_flag == 2) {
+        out->semantic_override    = IMG_ROLE_UNKNOWN;
+        out->semantic_override_on = 1;
+    }
+
+    /* Explicit role target bypasses the table's role_flag logic and
+     * lets the apply step honour it even on non-UNKNOWN cells. */
+    if (payload->role_target_on) {
+        out->semantic_override    = payload->role_target;
+        out->semantic_override_on = 1;
     }
 }
 

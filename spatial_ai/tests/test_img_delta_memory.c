@@ -451,6 +451,108 @@ static void test_feedback_roundtrip(void) {
     PASS();
 }
 
+/* ── Phase B: SoA lookup tables ──────────────────────────── */
+
+static void test_tables_init_idempotent_and_sized(void) {
+    TEST("Phase B tables: init idempotent + memory/entry sanity");
+
+    /* Eager init, then a second call must be a no-op. */
+    img_delta_tables_init();
+    img_delta_tables_init();
+
+    uint32_t entries = img_delta_tables_entry_count();
+    uint32_t bytes   = img_delta_tables_memory_bytes();
+
+    /* 8 × 4 × 8 × 4 × 3 × 3 = 9216 entries per SoA array. */
+    assert(entries == (uint32_t)(IMG_MODE_MAX * IMG_TIER_MAX *
+                                 IMG_SCALE_MAX * IMG_SIGN_MAX * 3 * 3));
+    assert(entries == 9216);
+
+    /* 4 × (int16 × N) + 1 × (u8 × N) + small step tables. Should live
+     * comfortably in L2 (< 256 KB budget). */
+    assert(bytes >= 9 * entries);     /* ≥ 4×2 + 1 bytes per slot */
+    assert(bytes < 256u * 1024u);
+
+    PASS();
+}
+
+static void test_lookup_covers_all_modes(void) {
+    TEST("lookup fires the right channel for each mode");
+
+    ImgCECell c;
+    make_cell(&c, IMG_ROLE_UNKNOWN, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
+
+    ImgConcreteDelta d;
+
+    /* INTENSITY → add_core nonzero, others zero. */
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.add_core != 0);
+    assert(d.add_link == 0 && d.add_delta == 0 && d.add_priority == 0);
+    assert(!d.direction_override_on && !d.depth_override_on);
+
+    /* LINK → add_link only. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_LINK);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.add_link != 0);
+    assert(d.add_core == 0 && d.add_delta == 0 && d.add_priority == 0);
+
+    /* PRIORITY → add_priority only. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_PRIORITY);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.add_priority != 0);
+    assert(d.add_core == 0 && d.add_link == 0 && d.add_delta == 0);
+
+    /* MOOD → add_delta + delta_sign_override. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_MOOD);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.add_delta != 0);
+    assert(d.delta_sign_override_on && d.delta_sign_override == IMG_DELTA_POSITIVE);
+
+    /* DIRECTION → direction_override_on only, channels untouched. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_DIRECTION);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.direction_override_on);
+    assert(d.add_core == 0 && d.add_link == 0
+           && d.add_delta == 0 && d.add_priority == 0);
+
+    /* DEPTH → depth_override_on only. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_DEPTH);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.depth_override_on);
+
+    /* ROLE POS on UNKNOWN → semantic_override_on → OBJECT. */
+    p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_ROLE);
+    img_delta_interpret(&c, &p, &d);
+    assert(d.semantic_override_on && d.semantic_override == IMG_ROLE_OBJECT);
+
+    PASS();
+}
+
+static void test_lookup_sign_symmetry(void) {
+    TEST("SIGN_POS and SIGN_NEG produce opposite numeric contributions");
+
+    ImgCECell c;
+    make_cell(&c, IMG_ROLE_UNKNOWN, IMG_TONE_MID, IMG_FLOW_NONE,
+              IMG_DEPTH_MIDGROUND, 0, IMG_DELTA_NONE);
+
+    ImgConcreteDelta dp, dn;
+    ImgDeltaPayload p_pos = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS,
+                                           IMG_MODE_INTENSITY);
+    ImgDeltaPayload p_neg = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_NEG,
+                                           IMG_MODE_INTENSITY);
+
+    img_delta_interpret(&c, &p_pos, &dp);
+    img_delta_interpret(&c, &p_neg, &dn);
+
+    assert(dp.add_core > 0 && dn.add_core < 0);
+    assert(dp.add_core == -dn.add_core);
+
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -465,6 +567,11 @@ int main(void) {
     test_apply_constraints();
     test_apply_role_gate();
     test_feedback_roundtrip();
+
+    /* Phase B */
+    test_tables_init_idempotent_and_sized();
+    test_lookup_covers_all_modes();
+    test_lookup_sign_symmetry();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

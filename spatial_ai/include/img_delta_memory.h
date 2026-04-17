@@ -160,15 +160,29 @@ typedef struct {
 
 /* Expand a bounded DeltaState payload against the cell's tags.
  *
- * Phase A (this impl): runtime arithmetic over tier/scale/mode, with
- * tone/depth scaling for intensity/priority.
- * Phase B (planned):   replace body with table lookup keyed by
- *                      (mode, tier, scale, sign) into SoA output tables,
- *                      per SPEC §13. No API change expected.
+ * Phase B: pure SoA table lookup per SPEC §13.2. No runtime
+ * arithmetic over channel values — every channel contribution comes
+ * from precomputed tables keyed by (mode, tier, scale, sign, tone,
+ * depth). Direction / depth clamps use tiny precomputed step tables.
+ *
+ * Tables are built lazily on first call. Call img_delta_tables_init
+ * at startup to avoid the cold-init cost.
  */
 void img_delta_interpret(const ImgCECell* cell,
                          const ImgDeltaPayload* payload,
                          ImgConcreteDelta* out);
+
+/* Build the SoA lookup tables eagerly. Safe to call repeatedly —
+ * subsequent calls are no-ops. */
+void img_delta_tables_init(void);
+
+/* Total bytes of static memory used by the Phase B tables. Useful
+ * for asserting SPEC §13.6 cache-tier budgets. */
+uint32_t img_delta_tables_memory_bytes(void);
+
+/* Number of entries in each SoA lookup array (the cartesian product
+ * of (mode, tier, scale, sign, tone, depth)). */
+uint32_t img_delta_tables_entry_count(void);
 
 /* ── DeltaUnit / DeltaMemory ─────────────────────────────── */
 
