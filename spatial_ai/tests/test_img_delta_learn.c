@@ -1,0 +1,284 @@
+#include "img_delta_learn.h"
+#include "img_ce.h"
+#include "img_delta_memory.h"
+#include "img_pipeline.h"
+
+#include <assert.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int tests_passed = 0;
+static int tests_total  = 0;
+
+#define TEST(name) do {                 \
+    tests_total++;                      \
+    printf("  [TEST] %s ... ", name);   \
+} while (0)
+
+#define PASS() do {                     \
+    tests_passed++;                     \
+    printf("PASS\n");                   \
+} while (0)
+
+/* ── helpers ─────────────────────────────────────────────── */
+
+/* Seed a CE cell with tags + channels under full control. */
+static void seed_cell(ImgCECell* c,
+                      uint8_t core, uint8_t link,
+                      uint8_t delta, uint8_t priority,
+                      uint8_t tone, uint8_t role,
+                      uint8_t dir, uint8_t depth,
+                      uint8_t sign) {
+    memset(c, 0, sizeof(*c));
+    c->core            = core;
+    c->link            = link;
+    c->delta           = delta;
+    c->priority        = priority;
+    c->tone_class      = tone;
+    c->semantic_role   = role;
+    c->direction_class = dir;
+    c->depth_class     = depth;
+    c->delta_sign      = sign;
+    c->last_delta_id   = IMG_DELTA_ID_NONE;
+}
+
+/* Make a 256x256 synthetic RGB image with 3 horizontal bands. */
+static uint8_t* make_banded_image(uint32_t w, uint32_t h,
+                                  uint8_t r_top, uint8_t g_top, uint8_t b_top,
+                                  uint8_t r_mid, uint8_t g_mid, uint8_t b_mid,
+                                  uint8_t r_bot, uint8_t g_bot, uint8_t b_bot) {
+    uint8_t* img = (uint8_t*)malloc((size_t)w * h * 3);
+    assert(img);
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t r, g, b;
+        if (y < h / 3)            { r = r_top; g = g_top; b = b_top; }
+        else if (y < 2 * h / 3)   { r = r_mid; g = g_mid; b = b_mid; }
+        else                       { r = r_bot; g = g_bot; b = b_bot; }
+        for (uint32_t x = 0; x < w; x++) {
+            size_t p = ((size_t)y * w + x) * 3;
+            img[p+0] = r; img[p+1] = g; img[p+2] = b;
+        }
+    }
+    return img;
+}
+
+/* ── identical grids produce no deltas ──────────────────── */
+
+static void test_identical_grids_zero_deltas(void) {
+    TEST("identical before/after grids add 0 deltas");
+
+    ImgCEGrid* before = img_ce_grid_create();
+    ImgCEGrid* after  = img_ce_grid_create();
+    assert(before && after);
+
+    /* Both grids are still zero-init — identical by definition. */
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    assert(mem);
+
+    uint32_t added = img_delta_memory_learn_from_pair(mem, before, after);
+    assert(added == 0);
+    assert(img_delta_memory_count(mem) == 0);
+
+    img_delta_memory_destroy(mem);
+    img_ce_grid_destroy(after);
+    img_ce_grid_destroy(before);
+    PASS();
+}
+
+/* ── single-cell core diff → one intensity delta ────────── */
+
+static void test_single_cell_core_diff(void) {
+    TEST("single-cell Δcore yields one MODE_INTENSITY delta");
+
+    ImgCEGrid* before = img_ce_grid_create();
+    ImgCEGrid* after  = img_ce_grid_create();
+    assert(before && after);
+
+    /* Match tags so only the numeric Δcore is a signal. */
+    seed_cell(&before->cells[img_ce_idx(10, 10)],
+              /*core=*/100, 50, 20, 128,
+              IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_HORIZONTAL, IMG_DEPTH_MIDGROUND,
+              IMG_DELTA_NONE);
+    seed_cell(&after->cells[img_ce_idx(10, 10)],
+              /*core=*/140, 50, 20, 128,     /* +40 core */
+              IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_HORIZONTAL, IMG_DEPTH_MIDGROUND,
+              IMG_DELTA_NONE);
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    uint32_t added = img_delta_memory_learn_from_pair(mem, before, after);
+    assert(added == 1);
+    assert(img_delta_memory_count(mem) == 1);
+
+    const ImgDeltaUnit* u = img_delta_memory_get(mem, 0);
+    assert(u);
+    assert(img_delta_state_mode(u->payload.state) == IMG_MODE_INTENSITY);
+    assert(img_delta_state_sign(u->payload.state) == IMG_SIGN_POS);
+    /* Magnitude 40 → tier T3 (> 24). */
+    assert(img_delta_state_tier(u->payload.state) == IMG_TIER_T3);
+
+    /* pre_key carries the before cell's tags. */
+    assert(img_state_key_semantic_role  (u->pre_key) == IMG_ROLE_OBJECT);
+    assert(img_state_key_depth_class    (u->pre_key) == IMG_DEPTH_MIDGROUND);
+    assert(img_state_key_direction_class(u->pre_key) == IMG_FLOW_HORIZONTAL);
+
+    /* post_hint is set, too. */
+    assert(u->has_post_hint);
+
+    img_delta_memory_destroy(mem);
+    img_ce_grid_destroy(after);
+    img_ce_grid_destroy(before);
+    PASS();
+}
+
+/* ── tag-level diff precedence: role > direction > depth ── */
+
+static void test_tag_precedence(void) {
+    TEST("tag change takes precedence over numeric diff");
+
+    ImgCEGrid* before = img_ce_grid_create();
+    ImgCEGrid* after  = img_ce_grid_create();
+    assert(before && after);
+
+    /* Role changes AND core also changes — role should win. */
+    seed_cell(&before->cells[img_ce_idx(0, 0)],
+              100, 0, 0, 0,
+              IMG_TONE_MID, IMG_ROLE_UNKNOWN,
+              IMG_FLOW_NONE, IMG_DEPTH_BACKGROUND,
+              IMG_DELTA_NONE);
+    seed_cell(&after->cells[img_ce_idx(0, 0)],
+              60, 0, 0, 0,                        /* Δcore = -40 */
+              IMG_TONE_MID, IMG_ROLE_PERSON,      /* role change */
+              IMG_FLOW_NONE, IMG_DEPTH_BACKGROUND,
+              IMG_DELTA_NONE);
+
+    /* Direction changes (and depth doesn't) — direction should win. */
+    seed_cell(&before->cells[img_ce_idx(0, 1)],
+              50, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_NONE, IMG_DEPTH_MIDGROUND, IMG_DELTA_NONE);
+    seed_cell(&after->cells[img_ce_idx(0, 1)],
+              50, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_DIAGONAL_UP, IMG_DEPTH_MIDGROUND, IMG_DELTA_NONE);
+
+    /* Depth changes only — depth wins. */
+    seed_cell(&before->cells[img_ce_idx(0, 2)],
+              50, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_NONE, IMG_DEPTH_BACKGROUND, IMG_DELTA_NONE);
+    seed_cell(&after->cells[img_ce_idx(0, 2)],
+              50, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND, IMG_DELTA_NONE);
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    uint32_t added = img_delta_memory_learn_from_pair(mem, before, after);
+    assert(added == 3);
+
+    const ImgDeltaUnit* role_u = img_delta_memory_get(mem, 0);
+    assert(img_delta_state_mode(role_u->payload.state) == IMG_MODE_ROLE);
+    assert(role_u->payload.role_target_on);
+    assert(role_u->payload.role_target == IMG_ROLE_PERSON);
+
+    const ImgDeltaUnit* dir_u = img_delta_memory_get(mem, 1);
+    assert(img_delta_state_mode(dir_u->payload.state) == IMG_MODE_DIRECTION);
+    assert(img_delta_state_sign(dir_u->payload.state) == IMG_SIGN_POS);
+
+    const ImgDeltaUnit* dep_u = img_delta_memory_get(mem, 2);
+    assert(img_delta_state_mode(dep_u->payload.state) == IMG_MODE_DEPTH);
+    assert(img_delta_state_sign(dep_u->payload.state) == IMG_SIGN_POS);
+
+    img_delta_memory_destroy(mem);
+    img_ce_grid_destroy(after);
+    img_ce_grid_destroy(before);
+    PASS();
+}
+
+/* ── noise floor: tiny Δcore is ignored ─────────────────── */
+
+static void test_numeric_noise_floor(void) {
+    TEST("sub-threshold numeric diffs are skipped (noise floor)");
+
+    ImgCEGrid* before = img_ce_grid_create();
+    ImgCEGrid* after  = img_ce_grid_create();
+
+    /* Δcore = 2 → below LEARN_NUMERIC_NOISE_FLOOR (=3). */
+    seed_cell(&before->cells[img_ce_idx(5, 5)],
+              50, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_NONE, IMG_DEPTH_MIDGROUND, IMG_DELTA_NONE);
+    seed_cell(&after->cells[img_ce_idx(5, 5)],
+              52, 0, 0, 0, IMG_TONE_MID, IMG_ROLE_OBJECT,
+              IMG_FLOW_NONE, IMG_DEPTH_MIDGROUND, IMG_DELTA_NONE);
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    uint32_t added = img_delta_memory_learn_from_pair(mem, before, after);
+    assert(added == 0);
+
+    img_delta_memory_destroy(mem);
+    img_ce_grid_destroy(after);
+    img_ce_grid_destroy(before);
+    PASS();
+}
+
+/* ── end-to-end: learn from synthetic pair → pipeline expansions > 0 ── */
+
+static void test_learn_drives_pipeline_expansions(void) {
+    TEST("learn from image pair → pipeline expansions > 0 on the before image");
+
+    /* Before: dark band in the middle, warm band on top, cool on bottom. */
+    uint8_t* before = make_banded_image(512, 512,
+                                        /*top=*/ 200, 100,  50,
+                                        /*mid=*/  30,  30,  30,
+                                        /*bot=*/  50, 100, 200);
+
+    /* After: each band shifted (warmer top, brighter mid, warmer bot). */
+    uint8_t* after = make_banded_image(512, 512,
+                                       /*top=*/ 220, 140,  60,
+                                       /*mid=*/  80,  80,  80,
+                                       /*bot=*/  80, 130, 220);
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    uint32_t added = img_delta_memory_learn_from_images(
+        mem, before, 512, 512, after, 512, 512);
+    assert(added > 0);
+    assert(img_delta_memory_count(mem) == added);
+
+    /* Now run the pipeline on the BEFORE image, with the learned
+     * memory. Expansions should be non-zero because seed cells can
+     * find matching deltas. */
+    ImgPipelineResult r = {0};
+    ImgPipelineOptions opt = img_pipeline_default_options();
+    opt.expansion_steps = 3;
+    assert(img_pipeline_run(before, 512, 512, mem, &opt, &r));
+
+    assert(r.stats.seed_count > 0);
+    assert(r.stats.expansions > 0);   /* ← the payoff */
+
+    /* And at least one cell now carries a real last_delta_id. */
+    int mutated = 0;
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        if (r.ce_grid->cells[i].last_delta_id != IMG_DELTA_ID_NONE) {
+            mutated = 1; break;
+        }
+    }
+    assert(mutated);
+
+    img_pipeline_result_destroy(&r);
+    img_delta_memory_destroy(mem);
+    free(after);
+    free(before);
+    PASS();
+}
+
+int main(void) {
+    printf("=== test_img_delta_learn ===\n");
+
+    test_identical_grids_zero_deltas();
+    test_single_cell_core_diff();
+    test_tag_precedence();
+    test_numeric_noise_floor();
+    test_learn_drives_pipeline_expansions();
+
+    printf("  %d/%d passed\n\n", tests_passed, tests_total);
+    return (tests_passed == tests_total) ? 0 : 1;
+}

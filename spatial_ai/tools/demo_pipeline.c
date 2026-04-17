@@ -18,6 +18,8 @@
 
 #include "img_pipeline.h"
 #include "img_render.h"
+#include "img_delta_learn.h"
+#include "img_delta_memory.h"
 #include "stb_image.h"
 #include "stb_image_write.h"
 
@@ -151,30 +153,47 @@ static int save_png(const char* path, const ImgRenderImage* img) {
 
 static void print_usage(const char* prog) {
     fprintf(stderr,
-        "usage: %s [--adapt] <input.ppm> [output_prefix]\n"
+        "usage: %s [flags] <input> [output_prefix]\n"
         "\n"
-        "   --adapt, -a   Run img_render_options_adapt_to_ce — per-channel\n"
-        "                 tier thresholds are re-derived from this image's\n"
-        "                 CE histogram before rendering.\n"
+        "   --adapt, -a\n"
+        "       Run img_render_options_adapt_to_ce — per-channel tier\n"
+        "       thresholds are re-derived from this image's CE histogram\n"
+        "       before rendering.\n"
         "\n"
-        "   Reads binary P6 PPM. Convert other formats externally:\n"
-        "     convert input.png input.ppm   (ImageMagick)\n"
-        "     ffmpeg -i input.png input.ppm\n"
+        "   --learn <before> <after>\n"
+        "       Populate a DeltaMemory from the before/after image pair\n"
+        "       (CE-grid differences drive img_delta_learn). The pipeline\n"
+        "       then runs with that memory on <input>, producing non-zero\n"
+        "       expansions when the input's cells match the learned keys.\n"
         "\n"
-        "   Outputs:\n"
-        "     <prefix>_plain.ppm   plain CE render\n"
-        "     <prefix>_masked.ppm  CE render + resolve mask overlay\n",
+        "   Reads PNG / JPEG / BMP / TGA (stb_image) or P6 PPM.\n"
+        "\n"
+        "   Outputs both .ppm and .png for each:\n"
+        "     <prefix>_plain   plain CE render\n"
+        "     <prefix>_masked  CE render + resolve mask overlay\n",
         prog);
 }
 
 int main(int argc, char** argv) {
     int adapt = 0;
+    const char* learn_before = NULL;
+    const char* learn_after  = NULL;
+
     int argi = 1;
     while (argi < argc && argv[argi][0] == '-') {
         if (strcmp(argv[argi], "--adapt") == 0 ||
             strcmp(argv[argi], "-a")      == 0) {
             adapt = 1;
             argi++;
+        } else if (strcmp(argv[argi], "--learn") == 0) {
+            if (argi + 2 >= argc) {
+                fprintf(stderr, "--learn needs <before> <after>\n");
+                print_usage(argv[0]);
+                return 2;
+            }
+            learn_before = argv[argi + 1];
+            learn_after  = argv[argi + 2];
+            argi += 3;
         } else if (strcmp(argv[argi], "--help") == 0 ||
                    strcmp(argv[argi], "-h")     == 0) {
             print_usage(argv[0]);
@@ -194,9 +213,32 @@ int main(int argc, char** argv) {
     uint8_t* img = load_image(input, &w, &h);
     if (!img) return 1;
 
+    /* Optionally learn a DeltaMemory from a before/after pair. */
+    ImgDeltaMemory* memory = NULL;
+    if (learn_before && learn_after) {
+        uint32_t bw = 0, bh = 0, aw = 0, ah = 0;
+        uint8_t* b = load_image(learn_before, &bw, &bh);
+        uint8_t* a = load_image(learn_after,  &aw, &ah);
+        if (!b || !a) {
+            free(b); free(a); free(img);
+            return 1;
+        }
+        memory = img_delta_memory_create();
+        uint32_t added = img_delta_memory_learn_from_images(
+            memory, b, bw, bh, a, aw, ah);
+        printf("=== learn ===\n");
+        printf("  before: %s (%u x %u)\n", learn_before, bw, bh);
+        printf("  after:  %s (%u x %u)\n", learn_after,  aw, ah);
+        printf("  deltas added: %u  (memory.count = %u)\n",
+               added, img_delta_memory_count(memory));
+        free(b);
+        free(a);
+    }
+
     ImgPipelineResult r = {0};
-    if (!img_pipeline_run(img, w, h, /*memory=*/NULL, /*opt=*/NULL, &r)) {
+    if (!img_pipeline_run(img, w, h, memory, /*opt=*/NULL, &r)) {
         fprintf(stderr, "pipeline failed\n");
+        if (memory) img_delta_memory_destroy(memory);
         free(img); return 1;
     }
 
@@ -263,6 +305,7 @@ int main(int argc, char** argv) {
     }
 
     img_pipeline_result_destroy(&r);
+    if (memory) img_delta_memory_destroy(memory);
     free(img);
     return (ok_plain && ok_masked) ? 0 : 1;
 }
