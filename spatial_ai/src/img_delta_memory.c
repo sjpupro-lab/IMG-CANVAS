@@ -18,6 +18,74 @@ static inline uint8_t sat_add_u8(uint8_t a, int delta) {
     return (uint8_t)v;
 }
 
+/* ── DeltaState packing (SPEC §3.1, §3.3) ───────────────── */
+
+#define DS_TIER_SHIFT            0
+#define DS_SCALE_SHIFT           2
+#define DS_PRECISION_SHIFT       5
+#define DS_SIGN_SHIFT            7
+#define DS_TICK_SHIFT            9
+#define DS_MODE_SHIFT           13
+#define DS_CHANNEL_LAYOUT_SHIFT 16
+#define DS_SLOT_SHAPE_SHIFT     19
+
+#define DS_TIER_MASK            (0x3u   << DS_TIER_SHIFT)            /* 2 bits */
+#define DS_SCALE_MASK           (0x7u   << DS_SCALE_SHIFT)           /* 3 bits */
+#define DS_PRECISION_MASK       (0x3u   << DS_PRECISION_SHIFT)       /* 2 bits */
+#define DS_SIGN_MASK            (0x3u   << DS_SIGN_SHIFT)            /* 2 bits */
+#define DS_TICK_MASK            (0xFu   << DS_TICK_SHIFT)            /* 4 bits */
+#define DS_MODE_MASK            (0x7u   << DS_MODE_SHIFT)            /* 3 bits */
+#define DS_CHANNEL_LAYOUT_MASK  (0x7u   << DS_CHANNEL_LAYOUT_SHIFT)  /* 3 bits */
+#define DS_SLOT_SHAPE_MASK      (0xFu   << DS_SLOT_SHAPE_SHIFT)      /* 4 bits */
+
+static inline uint32_t ds_clamp(uint32_t v, uint32_t max) {
+    return (v < max) ? v : (max - 1);
+}
+
+ImgDeltaState img_delta_state_make(uint8_t tier, uint8_t scale,
+                                   uint8_t precision, uint8_t sign,
+                                   uint8_t tick, uint8_t mode,
+                                   uint8_t channel_layout,
+                                   uint8_t slot_shape) {
+    return ((uint32_t)ds_clamp(tier,           IMG_TIER_MAX)           << DS_TIER_SHIFT)
+         | ((uint32_t)ds_clamp(scale,          IMG_SCALE_MAX)          << DS_SCALE_SHIFT)
+         | ((uint32_t)ds_clamp(precision,      IMG_PRECISION_MAX)      << DS_PRECISION_SHIFT)
+         | ((uint32_t)ds_clamp(sign,           IMG_SIGN_MAX)           << DS_SIGN_SHIFT)
+         | ((uint32_t)ds_clamp(tick,           IMG_TICK_MAX)           << DS_TICK_SHIFT)
+         | ((uint32_t)ds_clamp(mode,           IMG_MODE_MAX)           << DS_MODE_SHIFT)
+         | ((uint32_t)ds_clamp(channel_layout, IMG_CHANNEL_LAYOUT_MAX) << DS_CHANNEL_LAYOUT_SHIFT)
+         | ((uint32_t)ds_clamp(slot_shape,     IMG_SLOT_SHAPE_MAX)     << DS_SLOT_SHAPE_SHIFT);
+}
+
+ImgDeltaState img_delta_state_simple(uint8_t tier, uint8_t scale,
+                                     uint8_t sign, uint8_t mode) {
+    return img_delta_state_make(tier, scale, /*precision=*/0, sign,
+                                /*tick=*/0, mode,
+                                /*channel_layout=*/0,
+                                /*slot_shape=*/0);
+}
+
+uint8_t img_delta_state_tier          (ImgDeltaState s) { return (uint8_t)((s & DS_TIER_MASK)           >> DS_TIER_SHIFT); }
+uint8_t img_delta_state_scale         (ImgDeltaState s) { return (uint8_t)((s & DS_SCALE_MASK)          >> DS_SCALE_SHIFT); }
+uint8_t img_delta_state_precision     (ImgDeltaState s) { return (uint8_t)((s & DS_PRECISION_MASK)      >> DS_PRECISION_SHIFT); }
+uint8_t img_delta_state_sign          (ImgDeltaState s) { return (uint8_t)((s & DS_SIGN_MASK)           >> DS_SIGN_SHIFT); }
+uint8_t img_delta_state_tick          (ImgDeltaState s) { return (uint8_t)((s & DS_TICK_MASK)           >> DS_TICK_SHIFT); }
+uint8_t img_delta_state_mode          (ImgDeltaState s) { return (uint8_t)((s & DS_MODE_MASK)           >> DS_MODE_SHIFT); }
+uint8_t img_delta_state_channel_layout(ImgDeltaState s) { return (uint8_t)((s & DS_CHANNEL_LAYOUT_MASK) >> DS_CHANNEL_LAYOUT_SHIFT); }
+uint8_t img_delta_state_slot_shape    (ImgDeltaState s) { return (uint8_t)((s & DS_SLOT_SHAPE_MASK)     >> DS_SLOT_SHAPE_SHIFT); }
+
+int img_delta_state_is_valid(ImgDeltaState s) {
+    if (img_delta_state_tier          (s) >= IMG_TIER_MAX)           return 0;
+    if (img_delta_state_scale         (s) >= IMG_SCALE_MAX)          return 0;
+    if (img_delta_state_precision     (s) >= IMG_PRECISION_MAX)      return 0;
+    if (img_delta_state_sign          (s) >= IMG_SIGN_MAX)           return 0;
+    if (img_delta_state_tick          (s) >= IMG_TICK_MAX)           return 0;
+    if (img_delta_state_mode          (s) >= IMG_MODE_MAX)           return 0;
+    if (img_delta_state_channel_layout(s) >= IMG_CHANNEL_LAYOUT_MAX) return 0;
+    if (img_delta_state_slot_shape    (s) >= IMG_SLOT_SHAPE_MAX)     return 0;
+    return 1;
+}
+
 /* ── StateKey packing ───────────────────────────────────── */
 
 #define KEY_DELTA_SIGN_SHIFT       0
@@ -37,7 +105,6 @@ static inline uint8_t sat_add_u8(uint8_t a, int delta) {
 #define KEY_SEMANTIC_ROLE_MASK    (KEY_BYTE_MASK << KEY_SEMANTIC_ROLE_SHIFT)
 
 uint8_t img_link_bucket(uint8_t link) {
-    /* 8 buckets across 0..255 → bucket = link / 32 */
     return (uint8_t)(link >> 5);
 }
 
@@ -69,126 +136,138 @@ uint8_t img_state_key_depth_class    (ImgStateKey k) { return (uint8_t)((k >> KE
 uint8_t img_state_key_link_bucket    (ImgStateKey k) { return (uint8_t)((k >> KEY_LINK_BUCKET_SHIFT)     & KEY_BYTE_MASK); }
 uint8_t img_state_key_delta_sign     (ImgStateKey k) { return (uint8_t)((k >> KEY_DELTA_SIGN_SHIFT)      & KEY_BYTE_MASK); }
 
-/* Fallback chain: progressively zero bytes from least to most
- * discriminative. L0 = full key, L6 = wildcard. */
+/* Fallback chain (SPEC-aligned widening strategy). L0..L6. */
 #define FALLBACK_LEVELS 7
 static const ImgStateKey FALLBACK_MASKS[FALLBACK_LEVELS] = {
     /* L0 */ KEY_SEMANTIC_ROLE_MASK | KEY_TONE_CLASS_MASK | KEY_DIRECTION_CLASS_MASK |
              KEY_DEPTH_CLASS_MASK   | KEY_LINK_BUCKET_MASK | KEY_DELTA_SIGN_MASK,
-    /* L1: drop link_bucket */
-             KEY_SEMANTIC_ROLE_MASK | KEY_TONE_CLASS_MASK | KEY_DIRECTION_CLASS_MASK |
+    /* L1 */ KEY_SEMANTIC_ROLE_MASK | KEY_TONE_CLASS_MASK | KEY_DIRECTION_CLASS_MASK |
              KEY_DEPTH_CLASS_MASK   | KEY_DELTA_SIGN_MASK,
-    /* L2: also drop delta_sign */
-             KEY_SEMANTIC_ROLE_MASK | KEY_TONE_CLASS_MASK | KEY_DIRECTION_CLASS_MASK |
+    /* L2 */ KEY_SEMANTIC_ROLE_MASK | KEY_TONE_CLASS_MASK | KEY_DIRECTION_CLASS_MASK |
              KEY_DEPTH_CLASS_MASK,
-    /* L3: also drop tone_class */
-             KEY_SEMANTIC_ROLE_MASK | KEY_DIRECTION_CLASS_MASK | KEY_DEPTH_CLASS_MASK,
-    /* L4: also drop direction_class */
-             KEY_SEMANTIC_ROLE_MASK | KEY_DEPTH_CLASS_MASK,
-    /* L5: also drop depth_class */
-             KEY_SEMANTIC_ROLE_MASK,
-    /* L6: drop everything (wildcard) */
-             0
+    /* L3 */ KEY_SEMANTIC_ROLE_MASK | KEY_DIRECTION_CLASS_MASK | KEY_DEPTH_CLASS_MASK,
+    /* L4 */ KEY_SEMANTIC_ROLE_MASK | KEY_DEPTH_CLASS_MASK,
+    /* L5 */ KEY_SEMANTIC_ROLE_MASK,
+    /* L6 */ 0
 };
 
-/* ── Interpretation: symbolic payload → concrete delta ───── */
+/* ── Interpretation (Phase A: runtime; Phase B: lookup tables) ──
+ *
+ * Resolves one bounded DeltaState against a cell into a concrete
+ * output delta. Only one mode is active per delta, matching "단일
+ * resume code = 단일 상태" (SPEC §2.2, §9). To compose effects,
+ * callers stack multiple deltas.
+ */
+
+static inline int sign_signed(uint8_t sign) {
+    switch (sign) {
+        case IMG_SIGN_POS: return +1;
+        case IMG_SIGN_NEG: return -1;
+        default:           return  0;
+    }
+}
+
+/* Tier → base magnitude (T1 fine, T2 mid, T3 structure). */
+static const int TIER_MAGNITUDE[IMG_TIER_MAX] = { 0, 4, 12, 24 };
+
+/* Tone multiplier for INTENSITY mode (dark cells amplify). */
+static const int TONE_MULT_INTENSITY[3] = { 12, 6, 3 };  /* DARK, MID, BRIGHT scaled×4 below */
+
+/* Depth multiplier for PRIORITY mode (foreground absorbs more). */
+static const int DEPTH_MULT_PRIORITY[3] = { 3, 6, 10 };  /* BG, MID, FG scaled×4 below */
 
 void img_delta_interpret(const ImgCECell* cell,
                          const ImgDeltaPayload* payload,
                          ImgConcreteDelta* out) {
-    if (!out || !payload) return;
+    if (!out) return;
     memset(out, 0, sizeof(*out));
-    if (!cell) return;
+    if (!cell || !payload) return;
 
-    /* AXIS_INTENSITY: amplitude scales by tone — dark cells respond
-     * more strongly to "intensify" than already-bright cells. */
-    int s = payload->step[IMG_AXIS_INTENSITY];
-    if (s != 0) {
-        int per_step;
-        switch (cell->tone_class) {
-            case IMG_TONE_DARK:   per_step = 30; break;
-            case IMG_TONE_BRIGHT: per_step =  8; break;
-            default:              per_step = 18; break;  /* mid */
+    const ImgDeltaState s = payload->state;
+    const int    sign  = sign_signed(img_delta_state_sign(s));
+    const int    tier  = img_delta_state_tier(s);
+    const int    scale = img_delta_state_scale(s);  /* 0..7 */
+    const int    mode  = img_delta_state_mode(s);
+
+    if (tier == 0 || sign == 0 || mode == IMG_MODE_NONE) {
+        /* Zero-state: no effect, but still consume the apply step
+         * (e.g. tick progress only). */
+        return;
+    }
+
+    /* Base magnitude: tier × (1 + scale/2). Integer only. */
+    const int base = TIER_MAGNITUDE[tier] * (2 + scale) / 2;
+
+    switch (mode) {
+        case IMG_MODE_INTENSITY: {
+            int tm = TONE_MULT_INTENSITY[
+                cell->tone_class < 3 ? cell->tone_class : 1];
+            out->add_core = (int16_t)clamp_i(sign * base * tm / 4,
+                                             -200, 200);
+            break;
         }
-        out->add_core = (int16_t)clamp_i(s * per_step, -120, 120);
-    }
-
-    /* AXIS_LINK: 1 step = 16 link units (one bucket). */
-    s = payload->step[IMG_AXIS_LINK];
-    if (s != 0) {
-        out->add_link = (int16_t)clamp_i(s * 16, -120, 120);
-    }
-
-    /* AXIS_PRIORITY: foreground cells absorb larger priority bumps. */
-    s = payload->step[IMG_AXIS_PRIORITY];
-    if (s != 0) {
-        int per_step = (cell->depth_class == IMG_DEPTH_FOREGROUND) ? 25
-                     : (cell->depth_class == IMG_DEPTH_MIDGROUND)  ? 15
-                     :                                                 8;
-        out->add_priority = (int16_t)clamp_i(s * per_step, -120, 120);
-    }
-
-    /* AXIS_MOOD: pushes the delta channel and nudges the perceived
-     * delta_sign. Magnitude scaled modestly. */
-    s = payload->step[IMG_AXIS_MOOD];
-    if (s != 0) {
-        out->add_delta = (int16_t)clamp_i(s * 20, -120, 120);
-        if (s > 0) {
-            out->delta_sign_override    = IMG_DELTA_POSITIVE;
+        case IMG_MODE_LINK: {
+            out->add_link = (int16_t)clamp_i(sign * base, -120, 120);
+            break;
+        }
+        case IMG_MODE_PRIORITY: {
+            int dm = DEPTH_MULT_PRIORITY[
+                cell->depth_class < 3 ? cell->depth_class : 1];
+            out->add_priority = (int16_t)clamp_i(sign * base * dm / 4,
+                                                 -200, 200);
+            break;
+        }
+        case IMG_MODE_MOOD: {
+            out->add_delta = (int16_t)clamp_i(sign * base, -120, 120);
+            out->delta_sign_override    = (sign > 0) ? IMG_DELTA_POSITIVE
+                                                     : IMG_DELTA_NEGATIVE;
             out->delta_sign_override_on = 1;
-        } else {
-            out->delta_sign_override    = IMG_DELTA_NEGATIVE;
-            out->delta_sign_override_on = 1;
+            break;
         }
-    }
-
-    /* AXIS_DIRECTION: rotate one step. Constrained downstream to ±1. */
-    s = payload->step[IMG_AXIS_DIRECTION];
-    if (s != 0) {
-        int dir = (int)cell->direction_class + (s > 0 ? 1 : -1);
-        if (dir < 0) dir = 0;
-        if (dir > IMG_FLOW_DIAGONAL_DOWN) dir = IMG_FLOW_DIAGONAL_DOWN;
-        out->direction_override    = (uint8_t)dir;
-        out->direction_override_on = 1;
-    }
-
-    /* AXIS_DEPTH: nudge BG↔MID↔FG by one step. */
-    s = payload->step[IMG_AXIS_DEPTH];
-    if (s != 0) {
-        int d = (int)cell->depth_class + (s > 0 ? 1 : -1);
-        if (d < 0) d = 0;
-        if (d > IMG_DEPTH_FOREGROUND) d = IMG_DEPTH_FOREGROUND;
-        out->depth_override    = (uint8_t)d;
-        out->depth_override_on = 1;
-    }
-
-    /* AXIS_ROLE: explicit role_target trumps step direction. Otherwise
-     * a positive step on UNKNOWN promotes toward OBJECT, negative
-     * demotes toward UNKNOWN. The "constrained apply" stage decides
-     * whether to honor the override. */
-    s = payload->step[IMG_AXIS_ROLE];
-    if (payload->role_target_on) {
-        out->semantic_override    = payload->role_target;
-        out->semantic_override_on = 1;
-    } else if (s != 0) {
-        if (s > 0 && cell->semantic_role == IMG_ROLE_UNKNOWN) {
-            out->semantic_override    = IMG_ROLE_OBJECT;
-            out->semantic_override_on = 1;
-        } else if (s < 0) {
-            out->semantic_override    = IMG_ROLE_UNKNOWN;
-            out->semantic_override_on = 1;
+        case IMG_MODE_DIRECTION: {
+            int step = (sign > 0) ? 1 : -1;
+            int d    = (int)cell->direction_class + step;
+            if (d < 0) d = 0;
+            if (d > IMG_FLOW_DIAGONAL_DOWN) d = IMG_FLOW_DIAGONAL_DOWN;
+            out->direction_override    = (uint8_t)d;
+            out->direction_override_on = 1;
+            break;
         }
+        case IMG_MODE_DEPTH: {
+            int step = (sign > 0) ? 1 : -1;
+            int d    = (int)cell->depth_class + step;
+            if (d < 0) d = 0;
+            if (d > IMG_DEPTH_FOREGROUND) d = IMG_DEPTH_FOREGROUND;
+            out->depth_override    = (uint8_t)d;
+            out->depth_override_on = 1;
+            break;
+        }
+        case IMG_MODE_ROLE: {
+            if (payload->role_target_on) {
+                out->semantic_override    = payload->role_target;
+                out->semantic_override_on = 1;
+            } else if (sign > 0 && cell->semantic_role == IMG_ROLE_UNKNOWN) {
+                out->semantic_override    = IMG_ROLE_OBJECT;
+                out->semantic_override_on = 1;
+            } else if (sign < 0) {
+                out->semantic_override    = IMG_ROLE_UNKNOWN;
+                out->semantic_override_on = 1;
+            }
+            break;
+        }
+        default:
+            break;
     }
 }
 
-/* ── DeltaUnit success rate (Laplace) ───────────────────── */
+/* ── DeltaUnit success rate ─────────────────────────────── */
 
 double img_delta_unit_success_rate(const ImgDeltaUnit* u) {
     if (!u) return 0.0;
     return (double)(u->success_count + 1) / (double)(u->usage_count + 2);
 }
 
-/* ── DeltaMemory: flat dynamic array ────────────────────── */
+/* ── DeltaMemory storage ────────────────────────────────── */
 
 struct ImgDeltaMemory {
     ImgDeltaUnit* units;
@@ -353,8 +432,8 @@ void img_delta_apply(ImgCECell* cell,
         if (diff > 1)  cd.depth_override = (uint8_t)((int)cell->depth_class + 1);
         if (diff < -1) cd.depth_override = (uint8_t)((int)cell->depth_class - 1);
     }
-    /* Constraint: role override is honored only when current role is
-     * UNKNOWN, OR the unit explicitly carried role_target_on. */
+    /* Constraint: role override honored only when role_target_on or
+     * the current role is UNKNOWN. */
     if (cd.semantic_override_on
         && cell->semantic_role != IMG_ROLE_UNKNOWN
         && !unit->payload.role_target_on) {

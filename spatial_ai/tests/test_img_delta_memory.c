@@ -17,6 +17,8 @@ static int tests_total  = 0;
     printf("PASS\n");                   \
 } while (0)
 
+/* ── helpers ─────────────────────────────────────────────── */
+
 static void make_cell(ImgCECell* c,
                       uint8_t role, uint8_t tone, uint8_t dir,
                       uint8_t depth, uint8_t link, uint8_t sign) {
@@ -33,17 +35,73 @@ static void make_cell(ImgCECell* c,
     c->last_delta_id   = IMG_DELTA_ID_NONE;
 }
 
+static ImgDeltaPayload payload_simple(uint8_t tier, uint8_t scale,
+                                      uint8_t sign, uint8_t mode) {
+    ImgDeltaPayload p;
+    memset(&p, 0, sizeof(p));
+    p.state = img_delta_state_simple(tier, scale, sign, mode);
+    return p;
+}
+
+/* ── DeltaState pack / bounds ────────────────────────────── */
+
+static void test_delta_state_pack(void) {
+    TEST("DeltaState pack/unpack + validity bounds");
+
+    ImgDeltaState s = img_delta_state_make(
+        /*tier=*/           IMG_TIER_T2,
+        /*scale=*/          5,
+        /*precision=*/      2,
+        /*sign=*/           IMG_SIGN_POS,
+        /*tick=*/           9,
+        /*mode=*/           IMG_MODE_INTENSITY,
+        /*channel_layout=*/ 3,
+        /*slot_shape=*/     12);
+
+    assert(img_delta_state_tier          (s) == IMG_TIER_T2);
+    assert(img_delta_state_scale         (s) == 5);
+    assert(img_delta_state_precision     (s) == 2);
+    assert(img_delta_state_sign          (s) == IMG_SIGN_POS);
+    assert(img_delta_state_tick          (s) == 9);
+    assert(img_delta_state_mode          (s) == IMG_MODE_INTENSITY);
+    assert(img_delta_state_channel_layout(s) == 3);
+    assert(img_delta_state_slot_shape    (s) == 12);
+    assert(img_delta_state_is_valid(s));
+
+    /* Out-of-range values get clamped to (MAX-1). */
+    ImgDeltaState clamped = img_delta_state_make(99, 99, 99, 99,
+                                                 99, 99, 99, 99);
+    assert(img_delta_state_tier          (clamped) == IMG_TIER_MAX - 1);
+    assert(img_delta_state_scale         (clamped) == IMG_SCALE_MAX - 1);
+    assert(img_delta_state_precision     (clamped) == IMG_PRECISION_MAX - 1);
+    assert(img_delta_state_sign          (clamped) == IMG_SIGN_MAX - 1);
+    assert(img_delta_state_tick          (clamped) == IMG_TICK_MAX - 1);
+    assert(img_delta_state_mode          (clamped) == IMG_MODE_MAX - 1);
+    assert(img_delta_state_channel_layout(clamped) == IMG_CHANNEL_LAYOUT_MAX - 1);
+    assert(img_delta_state_slot_shape    (clamped) == IMG_SLOT_SHAPE_MAX - 1);
+
+    /* SPEC §3.1: every axis must be bounded. Entire u32 state must fit
+     * in the declared cartesian product. */
+    const uint64_t space =
+        (uint64_t)IMG_TIER_MAX * IMG_SCALE_MAX * IMG_PRECISION_MAX *
+        IMG_SIGN_MAX * IMG_TICK_MAX * IMG_MODE_MAX *
+        IMG_CHANNEL_LAYOUT_MAX * IMG_SLOT_SHAPE_MAX;
+    assert(space <= (1ULL << 23));   /* 23 bits used */
+
+    PASS();
+}
+
 /* ── StateKey pack/unpack ────────────────────────────────── */
 
 static void test_state_key_roundtrip(void) {
-    TEST("StateKey pack/unpack roundtrip");
+    TEST("StateKey pack/unpack roundtrip + link bucketing");
 
     ImgStateKey k = img_state_key_make(
         IMG_ROLE_PERSON,
         IMG_TONE_DARK,
         IMG_FLOW_DIAGONAL_UP,
         IMG_DEPTH_FOREGROUND,
-        5,                       /* link bucket */
+        5,
         IMG_DELTA_POSITIVE);
 
     assert(img_state_key_semantic_role  (k) == IMG_ROLE_PERSON);
@@ -53,13 +111,11 @@ static void test_state_key_roundtrip(void) {
     assert(img_state_key_link_bucket    (k) == 5);
     assert(img_state_key_delta_sign     (k) == IMG_DELTA_POSITIVE);
 
-    /* link bucket = link / 32 */
     assert(img_link_bucket(0)   == 0);
     assert(img_link_bucket(31)  == 0);
     assert(img_link_bucket(32)  == 1);
     assert(img_link_bucket(255) == 7);
 
-    /* from_cell uses the bucketed link */
     ImgCECell c;
     make_cell(&c, IMG_ROLE_SKY, IMG_TONE_BRIGHT, IMG_FLOW_HORIZONTAL,
               IMG_DEPTH_BACKGROUND, /*link=*/200, IMG_DELTA_NONE);
@@ -72,14 +128,14 @@ static void test_state_key_roundtrip(void) {
 /* ── add + count + get ───────────────────────────────────── */
 
 static void test_add_and_count(void) {
-    TEST("add + count + get");
+    TEST("add + count + get (DeltaState-backed payload)");
 
     ImgDeltaMemory* m = img_delta_memory_create();
     assert(m);
     assert(img_delta_memory_count(m) == 0);
 
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
-    p.step[IMG_AXIS_INTENSITY] = 1;
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
 
     ImgStateKey k = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                        IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
@@ -91,9 +147,9 @@ static void test_add_and_count(void) {
 
     const ImgDeltaUnit* u = img_delta_memory_get(m, 1);
     assert(u && u->id == 1 && u->pre_key == k);
-    assert(u->payload.step[IMG_AXIS_INTENSITY] == 1);
+    assert(img_delta_state_mode(u->payload.state) == IMG_MODE_INTENSITY);
+    assert(img_delta_state_tier(u->payload.state) == IMG_TIER_T1);
 
-    /* Insert enough to force a realloc (initial capacity 16) */
     for (int i = 0; i < 40; i++) img_delta_memory_add(m, k, p);
     assert(img_delta_memory_count(m) == 42);
 
@@ -107,66 +163,53 @@ static void test_fallback_chain(void) {
     TEST("candidates fallback chain widens key on miss");
 
     ImgDeltaMemory* m = img_delta_memory_create();
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
 
-    /* Stored at: PERSON / DARK / NONE / FOREGROUND / link=2 / POS */
     ImgStateKey stored = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                             IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
                                             2, IMG_DELTA_POSITIVE);
-    uint32_t id = img_delta_memory_add(m, stored, p);
-    (void)id;
+    (void)img_delta_memory_add(m, stored, p);
 
-    /* Exact match → L0 */
     {
-        const ImgDeltaUnit* out[8];
-        int level = -2;
+        const ImgDeltaUnit* out[8]; int level = -2;
         uint32_t n = img_delta_memory_candidates(m, stored, out, 8, &level);
-        assert(n == 1);
-        assert(level == 0);
+        assert(n == 1 && level == 0);
     }
 
-    /* Different link bucket → L1 hit (drop link_bucket) */
     {
         ImgStateKey q = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                            IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
                                            7, IMG_DELTA_POSITIVE);
-        const ImgDeltaUnit* out[8];
-        int level = -2;
+        const ImgDeltaUnit* out[8]; int level = -2;
         uint32_t n = img_delta_memory_candidates(m, q, out, 8, &level);
-        assert(n == 1);
-        assert(level == 1);
+        assert(n == 1 && level == 1);
     }
 
-    /* Different link AND sign → L2 hit (drop link + delta_sign) */
     {
         ImgStateKey q = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                            IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
                                            7, IMG_DELTA_NEGATIVE);
-        const ImgDeltaUnit* out[8];
-        int level = -2;
+        const ImgDeltaUnit* out[8]; int level = -2;
         uint32_t n = img_delta_memory_candidates(m, q, out, 8, &level);
-        assert(n == 1);
-        assert(level == 2);
+        assert(n == 1 && level == 2);
     }
 
-    /* Completely different role → only L6 wildcard hits. */
     {
         ImgStateKey q = img_state_key_make(IMG_ROLE_SKY, IMG_TONE_BRIGHT,
                                            IMG_FLOW_HORIZONTAL,
                                            IMG_DEPTH_BACKGROUND,
                                            5, IMG_DELTA_NONE);
-        const ImgDeltaUnit* out[8];
-        int level = -2;
+        const ImgDeltaUnit* out[8]; int level = -2;
         uint32_t n = img_delta_memory_candidates(m, q, out, 8, &level);
-        assert(n == 1);
-        assert(level == 6);
+        assert(n == 1 && level == 6);
     }
 
     img_delta_memory_destroy(m);
     PASS();
 }
 
-/* ── Laplace smoothing on success rate ───────────────────── */
+/* ── Laplace smoothing ──────────────────────────────────── */
 
 static void test_laplace_smoothing(void) {
     TEST("Laplace smoothing prevents 1/1 from dominating 50/100");
@@ -179,15 +222,12 @@ static void test_laplace_smoothing(void) {
     newbie.usage_count   = 1;
     newbie.success_count = 1;
 
-    double rv = img_delta_unit_success_rate(&veteran);   /* 51/102 ≈ 0.500 */
-    double rn = img_delta_unit_success_rate(&newbie);    /*   2/3  ≈ 0.667 */
+    double rv = img_delta_unit_success_rate(&veteran);
+    double rn = img_delta_unit_success_rate(&newbie);
 
-    /* New 1/1 still scores higher (0.667 > 0.500), but bounded.
-     * The contract is: smoothing must pull the newbie below 1.0. */
     assert(rn < 1.0);
     assert(rn > rv);
 
-    /* And a 0/0 is exactly 0.5 (no information). */
     ImgDeltaUnit fresh = {0};
     assert(img_delta_unit_success_rate(&fresh) == 0.5);
 
@@ -200,9 +240,9 @@ static void test_scoring_and_best(void) {
     TEST("scoring + best selection prefers exact, role-matched, smoothed-success unit");
 
     ImgDeltaMemory* m = img_delta_memory_create();
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T2, 3, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
 
-    /* Veteran: full match + 50/100 success */
     ImgStateKey k_full = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                             IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
                                             2, IMG_DELTA_NONE);
@@ -211,9 +251,6 @@ static void test_scoring_and_best(void) {
         img_delta_memory_record_usage(m, id_v, (i < 50) ? 1 : 0);
     }
 
-    /* Lone candidate with mismatched direction (still L0 because all
-     * fields are part of the key — but mismatched direction means
-     * direction_fit=0). */
     ImgStateKey k_other = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_DARK,
                                              IMG_FLOW_HORIZONTAL,
                                              IMG_DEPTH_FOREGROUND,
@@ -229,26 +266,23 @@ static void test_scoring_and_best(void) {
     int level = -2;
     const ImgDeltaUnit* best = img_delta_memory_best(m, &cur, &score, &level);
     assert(best != NULL);
-    /* Exact match (k_full) ought to win on direction_fit. */
     assert(best->id == id_v);
-    /* Both are at L0 since exact match exists for k_full. */
     assert(level == 0);
-    /* Score must include all four positive components and nothing
-     * negative from fallback. Lower bound check. */
     assert(score >= 0.35 + 0.20 + 0.20);
 
     img_delta_memory_destroy(m);
     PASS();
 }
 
-/* ── interpretation: same payload, different cell ─────────── */
+/* ── interpret: same symbolic state, different cell context ── */
 
 static void test_interpret_context_dependence(void) {
-    TEST("same symbolic payload expands differently per cell");
+    TEST("same DeltaState expands differently per cell tags");
 
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
-    p.step[IMG_AXIS_INTENSITY] = 1;
-    p.step[IMG_AXIS_PRIORITY]  = 1;
+    ImgDeltaPayload p_intensity = payload_simple(
+        IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_INTENSITY);
+    ImgDeltaPayload p_priority = payload_simple(
+        IMG_TIER_T2, 3, IMG_SIGN_POS, IMG_MODE_PRIORITY);
 
     ImgCECell dark_bg, bright_fg;
     make_cell(&dark_bg,   IMG_ROLE_UNKNOWN, IMG_TONE_DARK,   IMG_FLOW_NONE,
@@ -256,94 +290,126 @@ static void test_interpret_context_dependence(void) {
     make_cell(&bright_fg, IMG_ROLE_UNKNOWN, IMG_TONE_BRIGHT, IMG_FLOW_NONE,
               IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
 
-    ImgConcreteDelta d_dark, d_bright;
-    img_delta_interpret(&dark_bg,   &p, &d_dark);
-    img_delta_interpret(&bright_fg, &p, &d_bright);
+    ImgConcreteDelta d_dark_i, d_bright_i;
+    img_delta_interpret(&dark_bg,   &p_intensity, &d_dark_i);
+    img_delta_interpret(&bright_fg, &p_intensity, &d_bright_i);
+    /* Dark cell amplifies INTENSITY more than bright cell. */
+    assert(d_dark_i.add_core > d_bright_i.add_core);
 
-    /* Dark cell amplifies intensity more than bright cell. */
-    assert(d_dark.add_core > d_bright.add_core);
-    /* Foreground cell absorbs more priority than background. */
-    assert(d_bright.add_priority > d_dark.add_priority);
+    ImgConcreteDelta d_dark_p, d_bright_p;
+    img_delta_interpret(&dark_bg,   &p_priority, &d_dark_p);
+    img_delta_interpret(&bright_fg, &p_priority, &d_bright_p);
+    /* Foreground absorbs PRIORITY more than background. */
+    assert(d_bright_p.add_priority > d_dark_p.add_priority);
 
     PASS();
 }
 
-/* ── apply: constraints + last_delta_id + usage bump ─────── */
+/* ── interpret: zero-state produces no change ───────────── */
+
+static void test_interpret_zero_state(void) {
+    TEST("zero tier/sign/mode yields empty concrete delta");
+
+    ImgDeltaPayload p;
+    memset(&p, 0, sizeof(p));   /* all zero → MODE_NONE / TIER_NONE */
+
+    ImgCECell c;
+    make_cell(&c, IMG_ROLE_PERSON, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 64, IMG_DELTA_NONE);
+
+    ImgConcreteDelta d;
+    img_delta_interpret(&c, &p, &d);
+
+    assert(d.add_core == 0);
+    assert(d.add_link == 0);
+    assert(d.add_delta == 0);
+    assert(d.add_priority == 0);
+    assert(d.semantic_override_on == 0);
+    assert(d.depth_override_on == 0);
+    assert(d.direction_override_on == 0);
+    assert(d.delta_sign_override_on == 0);
+
+    PASS();
+}
+
+/* ── apply: direction / depth constrained to ±1 ─────────── */
 
 static void test_apply_constraints(void) {
     TEST("apply enforces ±1 dir/depth and writes last_delta_id");
 
     ImgDeltaMemory* m = img_delta_memory_create();
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
-    p.step[IMG_AXIS_DIRECTION] = 3;   /* try to over-rotate */
-    p.step[IMG_AXIS_DEPTH]     = 3;   /* try to over-jump   */
-
+    /* MODE_DIRECTION + POS + max scale → overrun prevented by ±1 rule */
+    ImgDeltaPayload p_dir = payload_simple(IMG_TIER_T3, IMG_SCALE_MAX - 1,
+                                           IMG_SIGN_POS, IMG_MODE_DIRECTION);
     ImgStateKey k = img_state_key_make(IMG_ROLE_UNKNOWN, IMG_TONE_MID,
                                        IMG_FLOW_NONE, IMG_DEPTH_BACKGROUND,
                                        0, IMG_DELTA_NONE);
-    uint32_t id = img_delta_memory_add(m, k, p);
-    const ImgDeltaUnit* u = img_delta_memory_get(m, id);
+    uint32_t id_dir = img_delta_memory_add(m, k, p_dir);
+
+    /* Then MODE_DEPTH POS */
+    ImgDeltaPayload p_depth = payload_simple(IMG_TIER_T3, IMG_SCALE_MAX - 1,
+                                             IMG_SIGN_POS, IMG_MODE_DEPTH);
+    uint32_t id_depth = img_delta_memory_add(m, k, p_depth);
 
     ImgCECell cur;
     make_cell(&cur, IMG_ROLE_UNKNOWN, IMG_TONE_MID, IMG_FLOW_NONE,
               IMG_DEPTH_BACKGROUND, 0, IMG_DELTA_NONE);
 
-    img_delta_apply(&cur, m, u);
+    img_delta_apply(&cur, m, img_delta_memory_get(m, id_dir));
+    assert(cur.direction_class == 1);       /* +1 from FLOW_NONE(0) */
+    assert(cur.last_delta_id == id_dir);
+    assert(img_delta_memory_get(m, id_dir)->usage_count == 1);
 
-    /* Direction may only rotate ±1 from FLOW_NONE (=0): result must be 1. */
-    assert(cur.direction_class == 1);
-    /* Depth may only step ±1 from BACKGROUND (=0): result must be MIDGROUND (=1). */
-    assert(cur.depth_class == IMG_DEPTH_MIDGROUND);
-    /* last_delta_id pinned to the applied unit. */
-    assert(cur.last_delta_id == id);
-    /* usage_count bumped once. */
-    assert(img_delta_memory_get(m, id)->usage_count == 1);
+    img_delta_apply(&cur, m, img_delta_memory_get(m, id_depth));
+    assert(cur.depth_class == IMG_DEPTH_MIDGROUND);   /* BG → MID */
+    assert(cur.last_delta_id == id_depth);
 
     img_delta_memory_destroy(m);
     PASS();
 }
 
-/* ── apply: role override is gated unless explicitly target_on ── */
+/* ── apply: role override gated ─────────────────────────── */
 
 static void test_apply_role_gate(void) {
     TEST("role override only fires on UNKNOWN unless role_target_on set");
 
     ImgDeltaMemory* m = img_delta_memory_create();
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
-    p.step[IMG_AXIS_ROLE] = 1;     /* unknown → object */
+
+    /* Implicit role promotion (POS on UNKNOWN → OBJECT). */
+    ImgDeltaPayload p_implicit = payload_simple(
+        IMG_TIER_T2, 2, IMG_SIGN_POS, IMG_MODE_ROLE);
 
     ImgStateKey k = img_state_key_make(IMG_ROLE_UNKNOWN, IMG_TONE_MID,
                                        IMG_FLOW_NONE, IMG_DEPTH_MIDGROUND,
                                        0, IMG_DELTA_NONE);
-    uint32_t id = img_delta_memory_add(m, k, p);
-    const ImgDeltaUnit* u = img_delta_memory_get(m, id);
+    uint32_t id_imp = img_delta_memory_add(m, k, p_implicit);
 
-    /* Cell with UNKNOWN role: gets promoted to OBJECT. */
     ImgCECell c1;
     make_cell(&c1, IMG_ROLE_UNKNOWN, IMG_TONE_MID, IMG_FLOW_NONE,
               IMG_DEPTH_MIDGROUND, 0, IMG_DELTA_NONE);
-    img_delta_apply(&c1, m, u);
+    img_delta_apply(&c1, m, img_delta_memory_get(m, id_imp));
     assert(c1.semantic_role == IMG_ROLE_OBJECT);
 
-    /* Cell with non-UNKNOWN role: override is dropped. */
     ImgCECell c2;
     make_cell(&c2, IMG_ROLE_PERSON, IMG_TONE_MID, IMG_FLOW_NONE,
               IMG_DEPTH_MIDGROUND, 0, IMG_DELTA_NONE);
-    img_delta_apply(&c2, m, u);
+    img_delta_apply(&c2, m, img_delta_memory_get(m, id_imp));
+    /* Non-UNKNOWN role, no role_target_on → override dropped. */
     assert(c2.semantic_role == IMG_ROLE_PERSON);
 
-    /* Now add a unit that asserts role_target_on: override should fire
-     * even on a non-UNKNOWN cell. */
-    ImgDeltaPayload p2; memset(&p2, 0, sizeof(p2));
-    p2.role_target = IMG_ROLE_FACE;
-    p2.role_target_on = 1;
-    uint32_t id2 = img_delta_memory_add(m, k, p2);
-    const ImgDeltaUnit* u2 = img_delta_memory_get(m, id2);
+    /* Explicit role target overrides the gate. */
+    ImgDeltaPayload p_target;
+    memset(&p_target, 0, sizeof(p_target));
+    p_target.state = img_delta_state_simple(IMG_TIER_T2, 2,
+                                            IMG_SIGN_POS, IMG_MODE_ROLE);
+    p_target.role_target     = IMG_ROLE_FACE;
+    p_target.role_target_on  = 1;
+    uint32_t id_tgt = img_delta_memory_add(m, k, p_target);
 
     ImgCECell c3;
     make_cell(&c3, IMG_ROLE_PERSON, IMG_TONE_MID, IMG_FLOW_NONE,
               IMG_DEPTH_MIDGROUND, 0, IMG_DELTA_NONE);
-    img_delta_apply(&c3, m, u2);
+    img_delta_apply(&c3, m, img_delta_memory_get(m, id_tgt));
     assert(c3.semantic_role == IMG_ROLE_FACE);
 
     img_delta_memory_destroy(m);
@@ -356,31 +422,28 @@ static void test_feedback_roundtrip(void) {
     TEST("resolve-style feedback updates the originating delta");
 
     ImgDeltaMemory* m = img_delta_memory_create();
-    ImgDeltaPayload p; memset(&p, 0, sizeof(p));
-    p.step[IMG_AXIS_INTENSITY] = 1;
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
 
     ImgStateKey k = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
                                        IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
                                        2, IMG_DELTA_NONE);
     uint32_t id = img_delta_memory_add(m, k, p);
-    const ImgDeltaUnit* u = img_delta_memory_get(m, id);
 
     ImgCECell cur;
     make_cell(&cur, IMG_ROLE_OBJECT, IMG_TONE_DARK, IMG_FLOW_NONE,
               IMG_DEPTH_FOREGROUND, 64, IMG_DELTA_NONE);
 
-    img_delta_apply(&cur, m, u);
+    img_delta_apply(&cur, m, img_delta_memory_get(m, id));
     assert(cur.last_delta_id == id);
     assert(img_delta_memory_get(m, id)->usage_count == 1);
     assert(img_delta_memory_get(m, id)->success_count == 0);
 
-    /* Pretend resolve evaluated the cell and decided this delta worked. */
-    img_delta_memory_record_usage(m, cur.last_delta_id, /*success=*/1);
+    img_delta_memory_record_usage(m, cur.last_delta_id, 1);
     assert(img_delta_memory_get(m, id)->usage_count == 2);
     assert(img_delta_memory_get(m, id)->success_count == 1);
 
-    /* Pretend a later resolve found it failed. */
-    img_delta_memory_record_usage(m, cur.last_delta_id, /*success=*/0);
+    img_delta_memory_record_usage(m, cur.last_delta_id, 0);
     assert(img_delta_memory_get(m, id)->usage_count == 3);
     assert(img_delta_memory_get(m, id)->success_count == 1);
 
@@ -391,12 +454,14 @@ static void test_feedback_roundtrip(void) {
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
+    test_delta_state_pack();
     test_state_key_roundtrip();
     test_add_and_count();
     test_fallback_chain();
     test_laplace_smoothing();
     test_scoring_and_best();
     test_interpret_context_dependence();
+    test_interpret_zero_state();
     test_apply_constraints();
     test_apply_role_gate();
     test_feedback_roundtrip();
