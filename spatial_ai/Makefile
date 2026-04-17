@@ -16,11 +16,12 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/spatial_generate.c \
        $(SRC_DIR)/spatial_io.c \
        $(SRC_DIR)/spatial_canvas.c \
-       $(SRC_DIR)/spatial_subtitle.c
+       $(SRC_DIR)/spatial_subtitle.c \
+       $(SRC_DIR)/img_ce.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce
 
 .PHONY: all clean test
 
@@ -77,6 +78,9 @@ $(BUILD_DIR)/test_adaptive: $(TEST_DIR)/test_adaptive.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_subtitle: $(TEST_DIR)/test_subtitle.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_ce: $(TEST_DIR)/test_img_ce.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── Wikipedia integration test (manual run) ─────────────────
