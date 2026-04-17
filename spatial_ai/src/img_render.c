@@ -1,4 +1,5 @@
 #include "img_render.h"
+#include "img_tier_table.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,11 +26,20 @@ static inline uint8_t tier_of(uint8_t v, ImgRenderTierSpec t) {
 
 ImgRenderOptions img_render_default_options(void) {
     ImgRenderOptions o;
-    o.cell_px       = 4;
-    o.tier_core     = (ImgRenderTierSpec){ 8, 32, 96 };
-    o.tier_link     = (ImgRenderTierSpec){ 8, 32, 96 };
-    o.tier_delta    = (ImgRenderTierSpec){ 8, 32, 96 };
-    o.tier_priority = (ImgRenderTierSpec){ 8, 32, 96 };
+    o.cell_px = 4;
+
+    /* Source per-channel defaults from the canonical tier table so
+     * render classification stays in sync with compute's scale_factor
+     * (SPEC §13.4). Callers can still override per channel. */
+    const ImgRenderTierSpec canonical = {
+        IMG_TIER_TABLE[IMG_TIER_T1].range_max,
+        IMG_TIER_TABLE[IMG_TIER_T2].range_max,
+        IMG_TIER_TABLE[IMG_TIER_T3].range_max,
+    };
+    o.tier_core     = canonical;
+    o.tier_link     = canonical;
+    o.tier_delta    = canonical;
+    o.tier_priority = canonical;
     return o;
 }
 
@@ -127,11 +137,51 @@ static void paint_cell_rgb(uint8_t* dst, uint32_t row_stride_bytes,
     }
 }
 
+/* ── mask overlay ───────────────────────────────────────── */
+
+/* Post-cell tint. Dims the base paint slightly and adds a directed
+ * hue so the caller can see which cells resolve touched.
+ *   tint_mode  1 → explained / absorbed  (shift toward cyan)
+ *   tint_mode  2 → promoted / unresolved (shift toward red)
+ */
+static void apply_mask_tint(uint8_t* dst, uint32_t row_stride_bytes,
+                            uint8_t cell_px, uint8_t tint_mode) {
+    for (uint8_t py = 0; py < cell_px; py++) {
+        for (uint8_t px = 0; px < cell_px; px++) {
+            uint8_t* p = dst + (size_t)py * row_stride_bytes
+                             + (size_t)px * 3u;
+            /* Dim the base by ~25%. */
+            p[0] = (uint8_t)((p[0] * 3u) / 4u);
+            p[1] = (uint8_t)((p[1] * 3u) / 4u);
+            p[2] = (uint8_t)((p[2] * 3u) / 4u);
+
+            if (tint_mode == 1) {
+                /* cyan shove */
+                int g = p[1] + 40; if (g > 255) g = 255;
+                int b = p[2] + 60; if (b > 255) b = 255;
+                p[1] = (uint8_t)g;
+                p[2] = (uint8_t)b;
+            } else if (tint_mode == 2) {
+                /* red shove */
+                int r = p[0] + 70; if (r > 255) r = 255;
+                p[0] = (uint8_t)r;
+            }
+        }
+    }
+}
+
 /* ── top-level render ───────────────────────────────────── */
 
 int img_render_ce_grid(const ImgCEGrid* ce,
                        const ImgRenderOptions* opt_or_null,
                        ImgRenderImage* out_img) {
+    return img_render_ce_grid_masked(ce, opt_or_null, NULL, out_img);
+}
+
+int img_render_ce_grid_masked(const ImgCEGrid* ce,
+                              const ImgRenderOptions* opt_or_null,
+                              const ImgRenderMasks* masks_or_null,
+                              ImgRenderImage* out_img) {
     if (!ce || !ce->cells || !out_img) return 0;
 
     const ImgRenderOptions opt = opt_or_null ? *opt_or_null
@@ -150,7 +200,8 @@ int img_render_ce_grid(const ImgCEGrid* ce,
 
     for (uint32_t cy = 0; cy < ce->height; cy++) {
         for (uint32_t cx = 0; cx < ce->width; cx++) {
-            const ImgCECell* c = &ce->cells[img_ce_idx(cy, cx)];
+            const uint32_t idx = img_ce_idx(cy, cx);
+            const ImgCECell* c = &ce->cells[idx];
 
             uint8_t* dst = rgb + ((size_t)cy * opt.cell_px) * row_stride
                                + ((size_t)cx * opt.cell_px) * 3u;
@@ -159,6 +210,16 @@ int img_render_ce_grid(const ImgCEGrid* ce,
                            c->core, c->link, c->delta, c->priority,
                            opt.tier_core, opt.tier_link,
                            opt.tier_delta, opt.tier_priority);
+
+            if (masks_or_null) {
+                const uint8_t o = masks_or_null->outlier
+                                ? masks_or_null->outlier[idx]   : 0;
+                const uint8_t e = masks_or_null->explained
+                                ? masks_or_null->explained[idx] : 0;
+                uint8_t tint = 0;
+                if (o) tint = e ? 1u : 2u;
+                if (tint) apply_mask_tint(dst, row_stride, opt.cell_px, tint);
+            }
         }
     }
 

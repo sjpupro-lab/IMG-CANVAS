@@ -49,11 +49,32 @@ typedef struct {
  * tier thresholds {8, 32, 96} on every channel. */
 ImgRenderOptions img_render_default_options(void);
 
+/* Optional per-cell resolve masks. Both arrays are IMG_CE_TOTAL bytes
+ * with 0/1 flags; either pointer may be NULL (that flag is ignored).
+ *
+ *   outlier==1 && explained==1 → absorbed / repaired  (cyan tint)
+ *   outlier==1 && explained==0 → promoted / unresolved (red tint)
+ *   else                       → no overlay
+ *
+ * Matches the "explained / survivor" visualization from the reference
+ * design, driven by img_ce_resolve's outputs. */
+typedef struct {
+    const uint8_t* outlier;
+    const uint8_t* explained;
+} ImgRenderMasks;
+
 /* Render a CE grid to RGB. Returns 1 on success, 0 on failure.
  * out_img->rgb is malloc'd — release with img_render_free_image. */
 int  img_render_ce_grid(const ImgCEGrid* ce,
                         const ImgRenderOptions* opt_or_null,
                         ImgRenderImage* out_img);
+
+/* Same as img_render_ce_grid but applies a per-cell mask overlay.
+ * `masks` may be NULL (equivalent to img_render_ce_grid). */
+int  img_render_ce_grid_masked(const ImgCEGrid* ce,
+                               const ImgRenderOptions* opt_or_null,
+                               const ImgRenderMasks* masks_or_null,
+                               ImgRenderImage* out_img);
 
 /* Save the image as binary PPM (P6). Zero-dependency, universally
  * decodable — useful for visual regression fixtures. */

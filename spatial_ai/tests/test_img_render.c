@@ -261,6 +261,81 @@ static void test_ppm_save_roundtrip(void) {
     PASS();
 }
 
+/* ── masked render: explained vs promoted tinting ───────── */
+
+static void test_masked_render_tints(void) {
+    TEST("masked render applies cyan/red tint for explained/promoted");
+
+    ImgCEGrid* ce = img_ce_grid_create();
+    assert(ce);
+
+    /* Three adjacent cells with identical channel values, so the
+     * raw renders are byte-identical and any per-cell pixel diffs
+     * come purely from the mask tint. */
+    for (int k = 0; k < 3; k++) {
+        set_single_cell(ce, 5, 5 + k, 80, 0, 0, 0);
+    }
+
+    uint8_t outlier_mask  [IMG_CE_TOTAL] = {0};
+    uint8_t explained_mask[IMG_CE_TOTAL] = {0};
+    /* cell (5, 5): outlier=0 — untinted */
+    /* cell (5, 6): outlier=1, explained=1 — cyan (absorbed) */
+    outlier_mask  [img_ce_idx(5, 6)] = 1;
+    explained_mask[img_ce_idx(5, 6)] = 1;
+    /* cell (5, 7): outlier=1, explained=0 — red (promoted) */
+    outlier_mask  [img_ce_idx(5, 7)] = 1;
+
+    ImgRenderMasks masks = { outlier_mask, explained_mask };
+
+    ImgRenderOptions opt = img_render_default_options();
+    opt.cell_px = 8;
+    ImgRenderImage img = {0};
+    assert(img_render_ce_grid_masked(ce, &opt, &masks, &img));
+
+    unsigned long long plain_r = cell_block_channel_sum(&img, opt.cell_px, 5, 5, 0);
+    unsigned long long plain_g = cell_block_channel_sum(&img, opt.cell_px, 5, 5, 1);
+    unsigned long long plain_b = cell_block_channel_sum(&img, opt.cell_px, 5, 5, 2);
+
+    unsigned long long absorbed_r = cell_block_channel_sum(&img, opt.cell_px, 6, 5, 0);
+    unsigned long long absorbed_g = cell_block_channel_sum(&img, opt.cell_px, 6, 5, 1);
+    unsigned long long absorbed_b = cell_block_channel_sum(&img, opt.cell_px, 6, 5, 2);
+
+    unsigned long long promoted_r = cell_block_channel_sum(&img, opt.cell_px, 7, 5, 0);
+    unsigned long long promoted_g = cell_block_channel_sum(&img, opt.cell_px, 7, 5, 1);
+    unsigned long long promoted_b = cell_block_channel_sum(&img, opt.cell_px, 7, 5, 2);
+
+    /* Absorbed (cyan shove): B lifted more than in plain. */
+    assert(absorbed_b > plain_b);
+    /* Absorbed also gains G and loses some R (cell gets dimmed). */
+    assert(absorbed_g > plain_g);
+
+    /* Promoted (red shove): R lifted more than in plain. */
+    assert(promoted_r > plain_r);
+    /* Promoted doesn't boost B. */
+    assert(promoted_b <= plain_b);
+
+    /* Unflagged cell should match a no-mask render exactly. */
+    ImgRenderImage plain = {0};
+    assert(img_render_ce_grid(ce, &opt, &plain));
+    const uint32_t block_bytes = opt.cell_px * opt.cell_px * 3u;
+    const uint32_t row_stride  = plain.width * 3u;
+    const size_t   off = (size_t)5 * opt.cell_px * row_stride
+                       + (size_t)5 * opt.cell_px * 3u;
+    /* Can't memcmp directly because cell block is non-contiguous —
+     * but we already verified by sum comparison above that untinted
+     * cell (5,5) has the same totals. Cross-check one row. */
+    for (uint8_t py = 0; py < opt.cell_px; py++) {
+        assert(memcmp(plain.rgb + off + py * row_stride,
+                      img.rgb   + off + py * row_stride,
+                      opt.cell_px * 3u) == 0);
+    }
+
+    img_render_free_image(&plain);
+    img_render_free_image(&img);
+    img_ce_grid_destroy(ce);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_render ===\n");
 
@@ -270,6 +345,7 @@ int main(void) {
     test_different_states_differ();
     test_tier4_bleed();
     test_ppm_save_roundtrip();
+    test_masked_render_tints();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

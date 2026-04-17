@@ -191,6 +191,54 @@ static void test_destroy_zero_init_safe(void) {
     PASS();
 }
 
+/* ── pipeline fills resolve masks, render consumes them ─── */
+
+static void test_pipeline_masks_flow_to_render(void) {
+    TEST("pipeline fills outlier/explained masks, render_masked consumes them");
+
+    uint8_t* img = make_banded_image(512, 512);
+    ImgPipelineResult r = {0};
+    ImgPipelineOptions opt = img_pipeline_default_options();
+    /* Low threshold → resolve more aggressive → more outliers flagged
+     * at the banded image's horizontal seams. */
+    opt.resolve_threshold = 10;
+    assert(img_pipeline_run(img, 512, 512, NULL, &opt, &r));
+
+    assert(r.outlier_mask   != NULL);
+    assert(r.explained_mask != NULL);
+
+    /* Mask counts agree with the stats. */
+    uint32_t outlier_c   = 0;
+    uint32_t explained_c = 0;
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        if (r.outlier_mask[i])   outlier_c++;
+        if (r.explained_mask[i]) explained_c++;
+    }
+    assert(outlier_c   == r.stats.resolve_outliers);
+    assert(explained_c == r.stats.resolve_explained);
+
+    /* The banded image has clear seams — something must flag. */
+    assert(outlier_c > 0);
+
+    /* Render with and without masks — output differs iff at least one
+     * cell is flagged (otherwise the mask overlay is a no-op). */
+    ImgRenderOptions ropt = img_render_default_options();
+    ImgRenderMasks masks = { r.outlier_mask, r.explained_mask };
+
+    ImgRenderImage plain = {0}, tinted = {0};
+    assert(img_render_ce_grid(r.ce_grid, &ropt, &plain));
+    assert(img_render_ce_grid_masked(r.ce_grid, &ropt, &masks, &tinted));
+
+    size_t n = (size_t)plain.width * plain.height * 3u;
+    assert(memcmp(plain.rgb, tinted.rgb, n) != 0);
+
+    img_render_free_image(&plain);
+    img_render_free_image(&tinted);
+    img_pipeline_result_destroy(&r);
+    free(img);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_pipeline ===\n");
 
@@ -199,6 +247,7 @@ int main(void) {
     test_expansion_with_memory();
     test_pipeline_then_render();
     test_destroy_zero_init_safe();
+    test_pipeline_masks_flow_to_render();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

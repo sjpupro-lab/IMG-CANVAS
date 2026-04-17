@@ -147,27 +147,42 @@ int img_pipeline_run(const uint8_t* image_rgb,
     free(frontier);
     free(next_frontier);
 
-    /* Stage 5: resolve. */
-    ImgResolveResult rr = {0, 0, 0, 0};
-    img_ce_resolve(ce, opt.resolve_threshold, NULL, NULL, &rr);
+    /* Stage 5: resolve with per-cell masks retained in the result. */
+    uint8_t* outlier_mask   = (uint8_t*)calloc(IMG_CE_TOTAL, 1);
+    uint8_t* explained_mask = (uint8_t*)calloc(IMG_CE_TOTAL, 1);
+    if (!outlier_mask || !explained_mask) {
+        free(outlier_mask); free(explained_mask);
+        img_small_canvas_destroy(sc); img_ce_grid_destroy(ce);
+        return 0;
+    }
 
-    out->small_canvas = sc;
-    out->ce_grid      = ce;
-    out->stats.seed_count        = seed_count;
-    out->stats.expansions        = expansions;
-    out->stats.visited           = visited_count;
-    out->stats.resolve_outliers  = rr.outlier_count;
-    out->stats.resolve_explained = rr.explained_count;
-    out->stats.resolve_promoted  = rr.promoted_count;
+    ImgResolveResult rr = {0, 0, 0, 0};
+    img_ce_resolve(ce, opt.resolve_threshold,
+                   outlier_mask, explained_mask, &rr);
+
+    out->small_canvas             = sc;
+    out->ce_grid                  = ce;
+    out->outlier_mask             = outlier_mask;
+    out->explained_mask           = explained_mask;
+    out->stats.seed_count         = seed_count;
+    out->stats.expansions         = expansions;
+    out->stats.visited            = visited_count;
+    out->stats.resolve_outliers   = rr.outlier_count;
+    out->stats.resolve_explained  = rr.explained_count;
+    out->stats.resolve_promoted   = rr.promoted_count;
 
     return 1;
 }
 
 void img_pipeline_result_destroy(ImgPipelineResult* r) {
     if (!r) return;
-    if (r->small_canvas) img_small_canvas_destroy(r->small_canvas);
-    if (r->ce_grid)      img_ce_grid_destroy(r->ce_grid);
-    r->small_canvas = NULL;
-    r->ce_grid      = NULL;
+    if (r->small_canvas)   img_small_canvas_destroy(r->small_canvas);
+    if (r->ce_grid)        img_ce_grid_destroy(r->ce_grid);
+    if (r->outlier_mask)   free(r->outlier_mask);
+    if (r->explained_mask) free(r->explained_mask);
+    r->small_canvas   = NULL;
+    r->ce_grid        = NULL;
+    r->outlier_mask   = NULL;
+    r->explained_mask = NULL;
     memset(&r->stats, 0, sizeof(r->stats));
 }

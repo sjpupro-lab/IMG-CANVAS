@@ -1,4 +1,5 @@
 #include "img_delta_compute.h"
+#include "img_tier_table.h"
 
 /* ── small helpers ──────────────────────────────────────── */
 
@@ -8,9 +9,8 @@ static inline int clamp_i(int v, int lo, int hi) {
     return v;
 }
 
-/* Tier base magnitudes (SPEC §10: T1 fine / T2 mid / T3 structure). */
-static const int TIER_MAGNITUDE[IMG_TIER_MAX] = { 0, 4, 12, 24 };
-/* Per-bucket multipliers used when mode + bucket interact. */
+/* Per-bucket multipliers used when mode + bucket interact. Tier
+ * magnitudes live in img_tier_table.c as the canonical source. */
 static const int TONE_MULT_INTENSITY [IMG_TONE_BUCKETS ] = { 12,  6,  3 };
 static const int DEPTH_MULT_PRIORITY [IMG_DEPTH_BUCKETS] = {  3,  6, 10 };
 
@@ -49,7 +49,7 @@ void img_delta_compute_entry(uint8_t mode, uint8_t tier,
         && tone  < IMG_TONE_BUCKETS
         && depth < IMG_DEPTH_BUCKETS) {
 
-        int base = TIER_MAGNITUDE[tier] * (2 + scale) / 2;
+        int base = (int)IMG_TIER_TABLE[tier].scale_factor * (2 + scale) / 2;
 
         switch (mode) {
             case IMG_MODE_INTENSITY:

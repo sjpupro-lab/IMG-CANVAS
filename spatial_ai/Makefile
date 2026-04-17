@@ -20,6 +20,7 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/img_ce.c \
        $(SRC_DIR)/img_delta_memory.c \
        $(SRC_DIR)/img_delta_compute.c \
+       $(SRC_DIR)/img_tier_table.c \
        $(SRC_DIR)/img_delta_tables_data.c \
        $(SRC_DIR)/img_set16.c \
        $(SRC_DIR)/img_render.c \
@@ -27,7 +28,7 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render test_img_pipeline
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render test_img_pipeline test_img_tier_table
 
 .PHONY: all clean test
 
@@ -101,11 +102,17 @@ $(BUILD_DIR)/test_img_render: $(TEST_DIR)/test_img_render.c $(OBJS) | $(BUILD_DI
 $(BUILD_DIR)/test_img_pipeline: $(TEST_DIR)/test_img_pipeline.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
+$(BUILD_DIR)/test_img_tier_table: $(TEST_DIR)/test_img_tier_table.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
 # ─── CE delta tables: offline generator + baked data ─────────
 TOOLS_DIR = tools
 
-$(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c $(BUILD_DIR)/img_delta_compute.o | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o -o $@ $(LDFLAGS)
+$(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c \
+                                $(BUILD_DIR)/img_delta_compute.o \
+                                $(BUILD_DIR)/img_tier_table.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o $(BUILD_DIR)/img_tier_table.o \
+	      -o $@ $(LDFLAGS)
 
 # Regenerate src/img_delta_tables_data.c from the generator. The
 # committed file should match this output — CI / a regression test

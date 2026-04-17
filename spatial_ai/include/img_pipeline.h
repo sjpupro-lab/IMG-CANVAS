@@ -45,6 +45,13 @@ typedef struct {
 typedef struct {
     ImgSmallCanvas*  small_canvas;
     ImgCEGrid*       ce_grid;
+
+    /* Per-cell resolve masks, each IMG_CE_TOTAL bytes. Populated by
+     * img_pipeline_run and owned by the result. Can be fed directly
+     * into img_render_ce_grid_masked via an ImgRenderMasks struct. */
+    uint8_t*         outlier_mask;
+    uint8_t*         explained_mask;
+
     ImgPipelineStats stats;
 } ImgPipelineResult;
 
