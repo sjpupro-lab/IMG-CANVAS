@@ -46,8 +46,19 @@ typedef struct {
 } ImgRenderImage;
 
 /* Sensible defaults: cell_px = 4 (CE 64×64 → 256×256 image),
- * tier thresholds {8, 32, 96} on every channel. */
+ * tier thresholds sourced from IMG_TIER_TABLE (range_max per tier)
+ * on every channel. */
 ImgRenderOptions img_render_default_options(void);
+
+/* Adapt the per-channel tier specs in `opts` to the value
+ * distribution of each CE channel (core / link / delta / priority).
+ * For every channel, builds a histogram, runs img_tier_adapt, and
+ * writes the resulting {t1_max, t2_max, t3_max} back into the
+ * matching ImgRenderTierSpec. scale_factor is not used here — this
+ * function only changes classification thresholds used at render
+ * time. cell_px is untouched. */
+void img_render_options_adapt_to_ce(ImgRenderOptions* opts,
+                                    const ImgCEGrid* ce);
 
 /* Optional per-cell resolve masks. Both arrays are IMG_CE_TOTAL bytes
  * with 0/1 flags; either pointer may be NULL (that flag is ignored).

@@ -43,6 +43,28 @@ ImgRenderOptions img_render_default_options(void) {
     return o;
 }
 
+/* Adapt one render tier spec from a CE channel's value distribution. */
+static void adapt_one_channel(ImgRenderTierSpec* spec,
+                              const ImgCEGrid* ce,
+                              ImgCEChannel ch) {
+    uint32_t hist[256];
+    img_tier_build_histogram_ce(ce, ch, hist);
+    ImgTierEntry adapted[IMG_TIER_MAX];
+    img_tier_adapt(hist, adapted);
+    spec->t1_max = adapted[IMG_TIER_T1].range_max;
+    spec->t2_max = adapted[IMG_TIER_T2].range_max;
+    spec->t3_max = adapted[IMG_TIER_T3].range_max;
+}
+
+void img_render_options_adapt_to_ce(ImgRenderOptions* opts,
+                                    const ImgCEGrid* ce) {
+    if (!opts || !ce) return;
+    adapt_one_channel(&opts->tier_core,     ce, IMG_CE_CHANNEL_CORE);
+    adapt_one_channel(&opts->tier_link,     ce, IMG_CE_CHANNEL_LINK);
+    adapt_one_channel(&opts->tier_delta,    ce, IMG_CE_CHANNEL_DELTA);
+    adapt_one_channel(&opts->tier_priority, ce, IMG_CE_CHANNEL_PRIORITY);
+}
+
 /* ── per-cell slot shape paint ──────────────────────────── */
 
 static void paint_cell_rgb(uint8_t* dst, uint32_t row_stride_bytes,

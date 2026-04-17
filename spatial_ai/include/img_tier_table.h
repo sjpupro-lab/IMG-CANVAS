@@ -56,4 +56,21 @@ uint8_t img_tier_classify_with(uint8_t value, const ImgTierEntry* tbl);
 void img_tier_adapt(const uint32_t histogram[256],
                     ImgTierEntry out[IMG_TIER_MAX]);
 
+/* ── Per-channel histograms off a CE grid ────────────────── */
+
+typedef enum {
+    IMG_CE_CHANNEL_CORE     = 0,
+    IMG_CE_CHANNEL_LINK     = 1,
+    IMG_CE_CHANNEL_DELTA    = 2,
+    IMG_CE_CHANNEL_PRIORITY = 3
+} ImgCEChannel;
+
+/* Build a 256-bin histogram of one CE channel's values across the
+ * entire grid. `out` is fully rewritten (no accumulation). Useful
+ * as an input to img_tier_adapt. */
+void img_tier_build_histogram_ce(const ImgCEGrid* ce,
+                                 ImgCEChannel channel,
+                                 uint32_t out[256]);
+
 #endif /* IMG_TIER_TABLE_H */
+

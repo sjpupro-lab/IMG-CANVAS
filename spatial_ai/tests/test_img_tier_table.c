@@ -1,4 +1,6 @@
 #include "img_tier_table.h"
+#include "img_ce.h"
+#include "img_render.h"
 
 #include <assert.h>
 #include <stdio.h>
@@ -127,6 +129,94 @@ static void test_adapt_empty_histogram(void) {
     PASS();
 }
 
+/* ── histogram from a CE channel ────────────────────────── */
+
+static void test_histogram_from_ce(void) {
+    TEST("img_tier_build_histogram_ce counts each channel independently");
+
+    ImgCEGrid* ce = img_ce_grid_create();
+    assert(ce);
+
+    /* Seed only two cells with distinct values so the histograms have
+     * predictable non-zero bins. */
+    ImgCECell* a = &ce->cells[img_ce_idx(0, 0)];
+    ImgCECell* b = &ce->cells[img_ce_idx(0, 1)];
+    a->core = 42; a->link = 10; a->delta =  5; a->priority = 200;
+    b->core = 42; b->link = 10; b->delta = 77; b->priority =   3;
+
+    uint32_t hist[256];
+
+    img_tier_build_histogram_ce(ce, IMG_CE_CHANNEL_CORE, hist);
+    assert(hist[42] == 2);
+    assert(hist[0]  == IMG_CE_TOTAL - 2);
+
+    img_tier_build_histogram_ce(ce, IMG_CE_CHANNEL_LINK, hist);
+    assert(hist[10] == 2);
+
+    img_tier_build_histogram_ce(ce, IMG_CE_CHANNEL_DELTA, hist);
+    assert(hist[5]  == 1);
+    assert(hist[77] == 1);
+
+    img_tier_build_histogram_ce(ce, IMG_CE_CHANNEL_PRIORITY, hist);
+    assert(hist[200] == 1);
+    assert(hist[3]   == 1);
+    /* Every other cell has priority=0, so the rest of the mass lives
+     * in hist[0]. */
+    assert(hist[0]   == IMG_CE_TOTAL - 2);
+
+    /* Total mass across all bins equals cell count. */
+    uint64_t total = 0;
+    for (int v = 0; v < 256; v++) total += hist[v];
+    assert(total == IMG_CE_TOTAL);
+
+    img_ce_grid_destroy(ce);
+    PASS();
+}
+
+/* ── options.adapt_to_ce modifies every channel spec ────── */
+
+static void test_render_options_adapt_to_ce(void) {
+    TEST("img_render_options_adapt_to_ce re-derives per-channel thresholds");
+
+    ImgCEGrid* ce = img_ce_grid_create();
+    assert(ce);
+
+    /* Seed a skewed distribution on two channels; leave the others
+     * at zero so their adapt should fall back to canonical defaults. */
+    for (uint32_t i = 0; i < 500; i++) {
+        ImgCECell* c = &ce->cells[i];
+        c->core     = (uint8_t)(50 + (i % 20));   /* core peak near 50..69 */
+        c->priority = (uint8_t)(200 + (i % 30));  /* priority peak near 200..229 */
+    }
+
+    ImgRenderOptions base = img_render_default_options();
+    ImgRenderOptions adapted = base;
+    img_render_options_adapt_to_ce(&adapted, ce);
+
+    /* Core channel: values cluster around 50..69 → t1..t3 should land
+     * inside that cluster (strictly above the canonical ≤ 96 mark but
+     * well below the saturated cutoff). Either way it must stay
+     * monotonic. */
+    assert(adapted.tier_core.t1_max < adapted.tier_core.t2_max);
+    assert(adapted.tier_core.t2_max < adapted.tier_core.t3_max);
+
+    /* Priority channel populated near 200 → thresholds must shift
+     * upward of the canonical range_max (96) for at least t3_max. */
+    assert(adapted.tier_priority.t3_max > base.tier_priority.t3_max);
+
+    /* Empty channels (link, delta) got a histogram of {bin 0 only} →
+     * img_tier_adapt falls back to canonical defaults, so t*_max
+     * equals the base values. */
+    assert(adapted.tier_link.t1_max == base.tier_link.t1_max);
+    assert(adapted.tier_link.t3_max == base.tier_link.t3_max);
+
+    /* cell_px must not be touched by adapt. */
+    assert(adapted.cell_px == base.cell_px);
+
+    img_ce_grid_destroy(ce);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_tier_table ===\n");
 
@@ -135,6 +225,8 @@ int main(void) {
     test_classify_with_custom();
     test_adapt_quantile();
     test_adapt_empty_histogram();
+    test_histogram_from_ce();
+    test_render_options_adapt_to_ce();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

@@ -1,4 +1,5 @@
 #include "img_tier_table.h"
+#include "img_ce.h"
 
 #include <string.h>
 
@@ -73,4 +74,28 @@ void img_tier_adapt(const uint32_t histogram[256],
     out[IMG_TIER_T1].range_max = (uint8_t)t1;
     out[IMG_TIER_T2].range_max = (uint8_t)t2;
     out[IMG_TIER_T3].range_max = (uint8_t)t3;
+}
+
+/* ── per-channel histogram ──────────────────────────────── */
+
+void img_tier_build_histogram_ce(const ImgCEGrid* ce,
+                                 ImgCEChannel channel,
+                                 uint32_t out[256]) {
+    if (!out) return;
+    memset(out, 0, 256 * sizeof(uint32_t));
+    if (!ce || !ce->cells) return;
+
+    const uint32_t n = ce->width * ce->height;
+    for (uint32_t i = 0; i < n; i++) {
+        const ImgCECell* c = &ce->cells[i];
+        uint8_t v;
+        switch (channel) {
+            case IMG_CE_CHANNEL_LINK:     v = c->link;     break;
+            case IMG_CE_CHANNEL_DELTA:    v = c->delta;    break;
+            case IMG_CE_CHANNEL_PRIORITY: v = c->priority; break;
+            case IMG_CE_CHANNEL_CORE:
+            default:                       v = c->core;     break;
+        }
+        out[v]++;
+    }
 }

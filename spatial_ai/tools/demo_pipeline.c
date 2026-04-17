@@ -95,7 +95,11 @@ static uint8_t* load_ppm_p6(const char* path,
 
 static void print_usage(const char* prog) {
     fprintf(stderr,
-        "usage: %s <input.ppm> [output_prefix]\n"
+        "usage: %s [--adapt] <input.ppm> [output_prefix]\n"
+        "\n"
+        "   --adapt, -a   Run img_render_options_adapt_to_ce — per-channel\n"
+        "                 tier thresholds are re-derived from this image's\n"
+        "                 CE histogram before rendering.\n"
         "\n"
         "   Reads binary P6 PPM. Convert other formats externally:\n"
         "     convert input.png input.ppm   (ImageMagick)\n"
@@ -108,10 +112,27 @@ static void print_usage(const char* prog) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 2) { print_usage(argv[0]); return 2; }
+    int adapt = 0;
+    int argi = 1;
+    while (argi < argc && argv[argi][0] == '-') {
+        if (strcmp(argv[argi], "--adapt") == 0 ||
+            strcmp(argv[argi], "-a")      == 0) {
+            adapt = 1;
+            argi++;
+        } else if (strcmp(argv[argi], "--help") == 0 ||
+                   strcmp(argv[argi], "-h")     == 0) {
+            print_usage(argv[0]);
+            return 0;
+        } else {
+            fprintf(stderr, "unknown flag: %s\n", argv[argi]);
+            print_usage(argv[0]);
+            return 2;
+        }
+    }
+    if (argi >= argc) { print_usage(argv[0]); return 2; }
 
-    const char* input  = argv[1];
-    const char* prefix = (argc >= 3) ? argv[2] : "demo_out";
+    const char* input  = argv[argi];
+    const char* prefix = (argi + 1 < argc) ? argv[argi + 1] : "demo_out";
 
     uint32_t w = 0, h = 0;
     uint8_t* img = load_ppm_p6(input, &w, &h);
@@ -136,6 +157,21 @@ int main(int argc, char** argv) {
     int ok_plain = 0, ok_masked = 0;
 
     ImgRenderOptions ropt = img_render_default_options();
+    if (adapt) {
+        img_render_options_adapt_to_ce(&ropt, r.ce_grid);
+        printf("  adapted tier.core:    {%u, %u, %u}\n",
+               ropt.tier_core.t1_max, ropt.tier_core.t2_max,
+               ropt.tier_core.t3_max);
+        printf("  adapted tier.link:    {%u, %u, %u}\n",
+               ropt.tier_link.t1_max, ropt.tier_link.t2_max,
+               ropt.tier_link.t3_max);
+        printf("  adapted tier.delta:   {%u, %u, %u}\n",
+               ropt.tier_delta.t1_max, ropt.tier_delta.t2_max,
+               ropt.tier_delta.t3_max);
+        printf("  adapted tier.priority:{%u, %u, %u}\n",
+               ropt.tier_priority.t1_max, ropt.tier_priority.t2_max,
+               ropt.tier_priority.t3_max);
+    }
 
     ImgRenderImage plain = {0};
     if (img_render_ce_grid(r.ce_grid, &ropt, &plain)) {
