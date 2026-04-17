@@ -18,11 +18,12 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/spatial_canvas.c \
        $(SRC_DIR)/spatial_subtitle.c \
        $(SRC_DIR)/img_ce.c \
-       $(SRC_DIR)/img_delta_memory.c
+       $(SRC_DIR)/img_delta_memory.c \
+       $(SRC_DIR)/img_set16.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16
 
 .PHONY: all clean test
 
@@ -85,6 +86,9 @@ $(BUILD_DIR)/test_img_ce: $(TEST_DIR)/test_img_ce.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_img_delta_memory: $(TEST_DIR)/test_img_delta_memory.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_set16: $(TEST_DIR)/test_img_set16.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── Wikipedia integration test (manual run) ─────────────────
