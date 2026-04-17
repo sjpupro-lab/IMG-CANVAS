@@ -1,0 +1,205 @@
+#include "img_pipeline.h"
+#include "img_render.h"
+
+#include <assert.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static int tests_passed = 0;
+static int tests_total  = 0;
+
+#define TEST(name) do {                 \
+    tests_total++;                      \
+    printf("  [TEST] %s ... ", name);   \
+} while (0)
+
+#define PASS() do {                     \
+    tests_passed++;                     \
+    printf("PASS\n");                   \
+} while (0)
+
+/* ── helpers ─────────────────────────────────────────────── */
+
+/* Build a 512x512 RGB image with three horizontal bands, mirroring
+ * the img_ce test fixture:
+ *   top    = cool sky     (80, 120, 200)
+ *   middle = dark object  (30,  30,  30)
+ *   bottom = warm ground  (160, 110,  70)
+ */
+static uint8_t* make_banded_image(uint32_t w, uint32_t h) {
+    uint8_t* img = (uint8_t*)malloc((size_t)w * h * 3);
+    assert(img);
+    for (uint32_t y = 0; y < h; y++) {
+        uint8_t r, g, b;
+        if      (y < h / 3)       { r =  80; g = 120; b = 200; }
+        else if (y < 2 * h / 3)   { r =  30; g =  30; b =  30; }
+        else                       { r = 160; g = 110; b =  70; }
+        for (uint32_t x = 0; x < w; x++) {
+            size_t p = ((size_t)y * w + x) * 3;
+            img[p+0] = r; img[p+1] = g; img[p+2] = b;
+        }
+    }
+    return img;
+}
+
+/* ── defaults + baseline (NULL memory) ───────────────────── */
+
+static void test_defaults_and_baseline(void) {
+    TEST("defaults + NULL-memory baseline: seeds > 0, expansions == 0");
+
+    ImgPipelineOptions opt = img_pipeline_default_options();
+    assert(opt.seed_fraction     >= 0.01f && opt.seed_fraction <= 0.05f);
+    assert(opt.expansion_steps   > 0);
+    assert(opt.frontier_max      > 0);
+    assert(opt.resolve_threshold > 0);
+
+    uint8_t* img = make_banded_image(512, 512);
+    ImgPipelineResult r = {0};
+    assert(img_pipeline_run(img, 512, 512,
+                            /*memory=*/NULL, /*opt=*/NULL, &r));
+
+    assert(r.small_canvas && r.ce_grid);
+    /* Default seed_fraction = 0.03, IMG_CE_TOTAL = 4096 → ~122. */
+    assert(r.stats.seed_count > 0);
+    assert(r.stats.seed_count <= IMG_CE_TOTAL);
+    assert(r.stats.expansions == 0);     /* no memory → no applies */
+    assert(r.stats.visited    >= r.stats.seed_count);
+
+    free(img);
+    img_pipeline_result_destroy(&r);
+    PASS();
+}
+
+/* ── seed fraction bounds ───────────────────────────────── */
+
+static void test_seed_fraction_bounds(void) {
+    TEST("seed_fraction = 0 → 0 seeds; seed_fraction = 1 → all cells");
+
+    uint8_t* img = make_banded_image(256, 256);
+
+    {
+        ImgPipelineOptions opt = img_pipeline_default_options();
+        opt.seed_fraction = 0.0f;
+        opt.expansion_steps = 0;
+        ImgPipelineResult r = {0};
+        assert(img_pipeline_run(img, 256, 256, NULL, &opt, &r));
+        assert(r.stats.seed_count == 0);
+        assert(r.stats.visited    == 0);
+        img_pipeline_result_destroy(&r);
+    }
+
+    {
+        ImgPipelineOptions opt = img_pipeline_default_options();
+        opt.seed_fraction = 1.0f;
+        opt.expansion_steps = 0;
+        ImgPipelineResult r = {0};
+        assert(img_pipeline_run(img, 256, 256, NULL, &opt, &r));
+        assert(r.stats.seed_count == IMG_CE_TOTAL);
+        assert(r.stats.visited    == IMG_CE_TOTAL);
+        img_pipeline_result_destroy(&r);
+    }
+
+    free(img);
+    PASS();
+}
+
+/* ── memory-driven expansion ────────────────────────────── */
+
+static void test_expansion_with_memory(void) {
+    TEST("populated memory triggers expansion events");
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    assert(mem);
+
+    /* A wildcard-friendly delta: pre_key = 0 matches every cell at
+     * the L6 fallback level, so the BFS will find and apply it for
+     * any cell regardless of tags.
+     *
+     * MODE_INTENSITY + TIER_T1 + scale=2 + SIGN_POS → small core bump. */
+    ImgDeltaPayload p;
+    memset(&p, 0, sizeof(p));
+    p.state = img_delta_state_simple(IMG_TIER_T1, 2,
+                                     IMG_SIGN_POS, IMG_MODE_INTENSITY);
+    img_delta_memory_add(mem, /*pre_key=*/0, p);
+
+    uint8_t* img = make_banded_image(512, 512);
+
+    /* With a non-empty memory, expansions should be > 0 and ≤ visited. */
+    ImgPipelineResult r = {0};
+    ImgPipelineOptions opt = img_pipeline_default_options();
+    opt.expansion_steps = 3;
+    opt.frontier_max    = 2048;
+    assert(img_pipeline_run(img, 512, 512, mem, &opt, &r));
+
+    assert(r.stats.seed_count > 0);
+    assert(r.stats.expansions > 0);
+    assert(r.stats.expansions <= r.stats.visited);
+
+    /* Verify the delta actually mutated the grid: at least one cell
+     * now has last_delta_id != IMG_DELTA_ID_NONE. */
+    int mutated = 0;
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        if (r.ce_grid->cells[i].last_delta_id != IMG_DELTA_ID_NONE) {
+            mutated = 1;
+            break;
+        }
+    }
+    assert(mutated);
+
+    free(img);
+    img_pipeline_result_destroy(&r);
+    img_delta_memory_destroy(mem);
+    PASS();
+}
+
+/* ── pipeline → render roundtrip ────────────────────────── */
+
+static void test_pipeline_then_render(void) {
+    TEST("pipeline result feeds img_render to a non-black image");
+
+    uint8_t* img = make_banded_image(512, 512);
+    ImgPipelineResult r = {0};
+    assert(img_pipeline_run(img, 512, 512, NULL, NULL, &r));
+
+    ImgRenderImage out = {0};
+    ImgRenderOptions ropt = img_render_default_options();
+    assert(img_render_ce_grid(r.ce_grid, &ropt, &out));
+    assert(out.width  == IMG_CE_SIZE * ropt.cell_px);
+    assert(out.height == IMG_CE_SIZE * ropt.cell_px);
+
+    /* The banded image should produce non-zero output because the
+     * CE has non-zero priority/core everywhere. */
+    unsigned long long s = 0;
+    size_t n = (size_t)out.width * out.height * 3u;
+    for (size_t i = 0; i < n; i++) s += out.rgb[i];
+    assert(s > 0);
+
+    img_render_free_image(&out);
+    img_pipeline_result_destroy(&r);
+    free(img);
+    PASS();
+}
+
+/* ── destroy safe on zero-init ───────────────────────────── */
+
+static void test_destroy_zero_init_safe(void) {
+    TEST("img_pipeline_result_destroy on zero-init is a no-op");
+    ImgPipelineResult r = {0};
+    img_pipeline_result_destroy(&r);   /* must not crash */
+    img_pipeline_result_destroy(NULL); /* must not crash */
+    PASS();
+}
+
+int main(void) {
+    printf("=== test_img_pipeline ===\n");
+
+    test_defaults_and_baseline();
+    test_seed_fraction_bounds();
+    test_expansion_with_memory();
+    test_pipeline_then_render();
+    test_destroy_zero_init_safe();
+
+    printf("  %d/%d passed\n\n", tests_passed, tests_total);
+    return (tests_passed == tests_total) ? 0 : 1;
+}
