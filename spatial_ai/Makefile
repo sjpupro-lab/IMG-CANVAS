@@ -114,6 +114,16 @@ $(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c \
 	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o $(BUILD_DIR)/img_tier_table.o \
 	      -o $@ $(LDFLAGS)
 
+# ─── PPM demo CLI: real image → pipeline → plain + masked PPM ──
+$(BUILD_DIR)/demo_pipeline: $(TOOLS_DIR)/demo_pipeline.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+.PHONY: demo
+demo: $(BUILD_DIR)/demo_pipeline
+	@echo "Built demo_pipeline. Usage:"
+	@echo "  convert input.png input.ppm    # if needed (ImageMagick)"
+	@echo "  ./build/demo_pipeline input.ppm [out_prefix]"
+
 # Regenerate src/img_delta_tables_data.c from the generator. The
 # committed file should match this output — CI / a regression test
 # verifies that the running tables match img_delta_compute_entry.

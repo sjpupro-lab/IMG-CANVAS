@@ -1,6 +1,8 @@
 build/
+build_demo/
 *.o
 *.exe
+*.ppm
 
 # Wikipedia dumps and extracted text (download via data/download_*.ps1)
 spatial_ai/data/*.bz2
