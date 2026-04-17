@@ -1,30 +1,45 @@
 /*
  * demo_pipeline — run an input image through the full CE pipeline
- * and save both a plain and a mask-overlayed PPM so the result is
- * visually inspectable.
+ * and save both a plain and a mask-overlayed image so the result
+ * is visually inspectable.
  *
- *   usage: demo_pipeline <input.ppm> [output_prefix]
+ *   usage: demo_pipeline [--adapt] <input> [output_prefix]
  *
- *   Reads binary P6 PPM input. To feed PNG/JPEG, convert first:
- *     convert input.png input.ppm    # ImageMagick
- *     ffmpeg -i input.png input.ppm  # ffmpeg
+ *   Reads PNG / JPEG / BMP / TGA via vendored stb_image, and
+ *   binary P6 PPM via a small built-in parser. The format is
+ *   picked from the file extension.
  *
- *   Produces:
- *     <prefix>_plain.ppm   — CE grid rendered with no overlay
- *     <prefix>_masked.ppm  — CE grid + resolve outlier/explained tint
- *                            (cyan = absorbed, red = promoted)
+ *   Writes both PNG (via stb_image_write) and PPM for every output:
+ *     <prefix>_plain.png  / <prefix>_plain.ppm
+ *     <prefix>_masked.png / <prefix>_masked.ppm
  *
  *   When output_prefix is omitted, "demo_out" is used.
  */
 
 #include "img_pipeline.h"
 #include "img_render.h"
+#include "stb_image.h"
+#include "stb_image_write.h"
 
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+/* ── format sniffing ────────────────────────────────────── */
+
+static int ends_with_ci(const char* s, const char* suffix) {
+    if (!s || !suffix) return 0;
+    size_t ls = strlen(s), lf = strlen(suffix);
+    if (lf > ls) return 0;
+    for (size_t i = 0; i < lf; i++) {
+        int a = tolower((unsigned char)s[ls - lf + i]);
+        int b = tolower((unsigned char)suffix[i]);
+        if (a != b) return 0;
+    }
+    return 1;
+}
 
 /* ── PPM (P6) loader ─────────────────────────────────────── */
 
@@ -91,6 +106,47 @@ static uint8_t* load_ppm_p6(const char* path,
     return buf;
 }
 
+/* ── stb-backed loader (PNG/JPEG/BMP/TGA) ────────────────── */
+
+static uint8_t* load_with_stb(const char* path,
+                              uint32_t* out_w, uint32_t* out_h) {
+    int w = 0, h = 0, c = 0;
+    stbi_uc* pixels = stbi_load(path, &w, &h, &c, /*desired_channels=*/3);
+    if (!pixels) {
+        fprintf(stderr, "%s: stb_image failed: %s\n",
+                path, stbi_failure_reason());
+        return NULL;
+    }
+    const size_t n = (size_t)w * (size_t)h * 3u;
+    uint8_t* buf = (uint8_t*)malloc(n);
+    if (!buf) { stbi_image_free(pixels); return NULL; }
+    memcpy(buf, pixels, n);
+    stbi_image_free(pixels);
+    *out_w = (uint32_t)w;
+    *out_h = (uint32_t)h;
+    return buf;
+}
+
+/* ── dispatcher ──────────────────────────────────────────── */
+
+static uint8_t* load_image(const char* path,
+                           uint32_t* out_w, uint32_t* out_h) {
+    if (ends_with_ci(path, ".ppm")) {
+        return load_ppm_p6(path, out_w, out_h);
+    }
+    /* Everything else goes through stb — PNG, JPEG, BMP, TGA, PSD. */
+    return load_with_stb(path, out_w, out_h);
+}
+
+/* ── PNG writer (via stb_image_write) ────────────────────── */
+
+static int save_png(const char* path, const ImgRenderImage* img) {
+    if (!path || !img || !img->rgb) return 0;
+    const int stride = (int)(img->width * 3u);
+    return stbi_write_png(path, (int)img->width, (int)img->height,
+                          /*comp=*/3, img->rgb, stride) != 0;
+}
+
 /* ── main ────────────────────────────────────────────────── */
 
 static void print_usage(const char* prog) {
@@ -135,7 +191,7 @@ int main(int argc, char** argv) {
     const char* prefix = (argi + 1 < argc) ? argv[argi + 1] : "demo_out";
 
     uint32_t w = 0, h = 0;
-    uint8_t* img = load_ppm_p6(input, &w, &h);
+    uint8_t* img = load_image(input, &w, &h);
     if (!img) return 1;
 
     ImgPipelineResult r = {0};
@@ -176,12 +232,16 @@ int main(int argc, char** argv) {
     ImgRenderImage plain = {0};
     if (img_render_ce_grid(r.ce_grid, &ropt, &plain)) {
         snprintf(path, sizeof(path), "%s_plain.ppm", prefix);
-        if (img_render_save_ppm(path, &plain)) {
-            printf("  wrote %s  (%u x %u)\n", path, plain.width, plain.height);
-            ok_plain = 1;
-        } else {
-            fprintf(stderr, "failed to write %s\n", path);
-        }
+        int ppm_ok = img_render_save_ppm(path, &plain);
+        if (ppm_ok) printf("  wrote %s  (%u x %u)\n", path,
+                           plain.width, plain.height);
+
+        snprintf(path, sizeof(path), "%s_plain.png", prefix);
+        int png_ok = save_png(path, &plain);
+        if (png_ok) printf("  wrote %s  (%u x %u)\n", path,
+                           plain.width, plain.height);
+
+        ok_plain = ppm_ok && png_ok;
         img_render_free_image(&plain);
     }
 
@@ -189,12 +249,16 @@ int main(int argc, char** argv) {
     ImgRenderMasks masks = { r.outlier_mask, r.explained_mask };
     if (img_render_ce_grid_masked(r.ce_grid, &ropt, &masks, &masked)) {
         snprintf(path, sizeof(path), "%s_masked.ppm", prefix);
-        if (img_render_save_ppm(path, &masked)) {
-            printf("  wrote %s (%u x %u)\n", path, masked.width, masked.height);
-            ok_masked = 1;
-        } else {
-            fprintf(stderr, "failed to write %s\n", path);
-        }
+        int ppm_ok = img_render_save_ppm(path, &masked);
+        if (ppm_ok) printf("  wrote %s (%u x %u)\n", path,
+                           masked.width, masked.height);
+
+        snprintf(path, sizeof(path), "%s_masked.png", prefix);
+        int png_ok = save_png(path, &masked);
+        if (png_ok) printf("  wrote %s (%u x %u)\n", path,
+                           masked.width, masked.height);
+
+        ok_masked = ppm_ok && png_ok;
         img_render_free_image(&masked);
     }
 

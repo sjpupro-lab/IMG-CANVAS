@@ -114,15 +114,24 @@ $(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c \
 	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o $(BUILD_DIR)/img_tier_table.o \
 	      -o $@ $(LDFLAGS)
 
-# ─── PPM demo CLI: real image → pipeline → plain + masked PPM ──
-$(BUILD_DIR)/demo_pipeline: $(TOOLS_DIR)/demo_pipeline.c $(OBJS) | $(BUILD_DIR)
-	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+# ─── Vendored stb_image (third_party/), built with relaxed warnings ──
+THIRD_PARTY_DIR = third_party
+
+$(BUILD_DIR)/stb_image_impl.o: $(THIRD_PARTY_DIR)/stb_image_impl.c | $(BUILD_DIR)
+	$(CC) -O2 -std=c11 -I$(THIRD_PARTY_DIR) -w -c $< -o $@
+
+# ─── Demo CLI: real image → pipeline → plain + masked PNG/PPM ──
+$(BUILD_DIR)/demo_pipeline: $(TOOLS_DIR)/demo_pipeline.c $(OBJS) \
+                             $(BUILD_DIR)/stb_image_impl.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(THIRD_PARTY_DIR) $< $(OBJS) \
+	      $(BUILD_DIR)/stb_image_impl.o -o $@ $(LDFLAGS)
 
 .PHONY: demo
 demo: $(BUILD_DIR)/demo_pipeline
 	@echo "Built demo_pipeline. Usage:"
-	@echo "  convert input.png input.ppm    # if needed (ImageMagick)"
-	@echo "  ./build/demo_pipeline input.ppm [out_prefix]"
+	@echo "  ./build/demo_pipeline [--adapt] input.png [out_prefix]"
+	@echo "  Reads PNG/JPEG/BMP/TGA via stb_image, or P6 PPM directly."
+	@echo "  Writes both .png and .ppm next to <out_prefix>."
 
 # Regenerate src/img_delta_tables_data.c from the generator. The
 # committed file should match this output — CI / a regression test
