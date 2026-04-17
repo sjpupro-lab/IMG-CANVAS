@@ -17,11 +17,19 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/spatial_io.c \
        $(SRC_DIR)/spatial_canvas.c \
        $(SRC_DIR)/spatial_subtitle.c \
-       $(SRC_DIR)/img_ce.c
+       $(SRC_DIR)/img_ce.c \
+       $(SRC_DIR)/img_delta_memory.c \
+       $(SRC_DIR)/img_delta_compute.c \
+       $(SRC_DIR)/img_tier_table.c \
+       $(SRC_DIR)/img_delta_tables_data.c \
+       $(SRC_DIR)/img_set16.c \
+       $(SRC_DIR)/img_render.c \
+       $(SRC_DIR)/img_pipeline.c \
+       $(SRC_DIR)/img_delta_learn.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render test_img_pipeline test_img_tier_table test_img_delta_learn
 
 .PHONY: all clean test
 
@@ -82,6 +90,60 @@ $(BUILD_DIR)/test_subtitle: $(TEST_DIR)/test_subtitle.c $(OBJS) | $(BUILD_DIR)
 
 $(BUILD_DIR)/test_img_ce: $(TEST_DIR)/test_img_ce.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_delta_memory: $(TEST_DIR)/test_img_delta_memory.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_set16: $(TEST_DIR)/test_img_set16.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_render: $(TEST_DIR)/test_img_render.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_pipeline: $(TEST_DIR)/test_img_pipeline.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_tier_table: $(TEST_DIR)/test_img_tier_table.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_img_delta_learn: $(TEST_DIR)/test_img_delta_learn.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+# ─── CE delta tables: offline generator + baked data ─────────
+TOOLS_DIR = tools
+
+$(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c \
+                                $(BUILD_DIR)/img_delta_compute.o \
+                                $(BUILD_DIR)/img_tier_table.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o $(BUILD_DIR)/img_tier_table.o \
+	      -o $@ $(LDFLAGS)
+
+# ─── Vendored stb_image (third_party/), built with relaxed warnings ──
+THIRD_PARTY_DIR = third_party
+
+$(BUILD_DIR)/stb_image_impl.o: $(THIRD_PARTY_DIR)/stb_image_impl.c | $(BUILD_DIR)
+	$(CC) -O2 -std=c11 -I$(THIRD_PARTY_DIR) -w -c $< -o $@
+
+# ─── Demo CLI: real image → pipeline → plain + masked PNG/PPM ──
+$(BUILD_DIR)/demo_pipeline: $(TOOLS_DIR)/demo_pipeline.c $(OBJS) \
+                             $(BUILD_DIR)/stb_image_impl.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(THIRD_PARTY_DIR) $< $(OBJS) \
+	      $(BUILD_DIR)/stb_image_impl.o -o $@ $(LDFLAGS)
+
+.PHONY: demo
+demo: $(BUILD_DIR)/demo_pipeline
+	@echo "Built demo_pipeline. Usage:"
+	@echo "  ./build/demo_pipeline [--adapt] input.png [out_prefix]"
+	@echo "  Reads PNG/JPEG/BMP/TGA via stb_image, or P6 PPM directly."
+	@echo "  Writes both .png and .ppm next to <out_prefix>."
+
+# Regenerate src/img_delta_tables_data.c from the generator. The
+# committed file should match this output — CI / a regression test
+# verifies that the running tables match img_delta_compute_entry.
+.PHONY: gen-tables
+gen-tables: $(BUILD_DIR)/gen_delta_tables
+	$(BUILD_DIR)/gen_delta_tables > $(SRC_DIR)/img_delta_tables_data.c
+	@echo "Regenerated $(SRC_DIR)/img_delta_tables_data.c"
 
 # ─── Wikipedia integration test (manual run) ─────────────────
 $(BUILD_DIR)/test_wiki: $(TEST_DIR)/test_wiki.c $(OBJS) | $(BUILD_DIR)
