@@ -248,6 +248,7 @@ void img_small_canvas_to_ce(const ImgSmallCanvas* sc, ImgCEGrid* out) {
             c->depth_class     = depth;
             c->semantic_role   = guess_semantic_role(depth, mood, intensity);
             c->delta_sign      = IMG_DELTA_NONE;
+            c->last_delta_id   = IMG_DELTA_ID_NONE;
         }
     }
 }

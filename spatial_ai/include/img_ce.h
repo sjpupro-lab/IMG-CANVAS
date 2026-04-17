@@ -144,7 +144,14 @@ typedef struct {
     uint8_t direction_class;  /* ImgFlowClass */
     uint8_t depth_class;      /* ImgDepthClass */
     uint8_t delta_sign;       /* ImgDeltaSign */
+
+    /* Last delta unit applied to this cell (UINT32_MAX = none).
+     * Lets resolve credit success/failure back to the originating
+     * delta so DeltaMemory can learn from outcomes. */
+    uint32_t last_delta_id;
 } ImgCECell;
+
+#define IMG_DELTA_ID_NONE 0xFFFFFFFFu
 
 typedef struct {
     ImgCECell* cells;   /* IMG_CE_TOTAL cells, row-major */
