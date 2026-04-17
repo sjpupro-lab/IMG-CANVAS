@@ -1,8 +1,17 @@
 #include "img_delta_memory.h"
+#include "img_delta_compute.h"
 
 #include <assert.h>
 #include <stdio.h>
 #include <string.h>
+
+extern const int16_t g_core_table    [IMG_DELTA_TABLE_N];
+extern const int16_t g_link_table    [IMG_DELTA_TABLE_N];
+extern const int16_t g_delta_table   [IMG_DELTA_TABLE_N];
+extern const int16_t g_priority_table[IMG_DELTA_TABLE_N];
+extern const uint8_t g_pattern_table [IMG_DELTA_TABLE_N];
+extern const uint8_t g_direction_step[IMG_FLOW_BUCKETS][IMG_SIGN_MAX];
+extern const uint8_t g_depth_step    [IMG_DEPTH_BUCKETS][IMG_SIGN_MAX];
 
 static int tests_passed = 0;
 static int tests_total  = 0;
@@ -553,6 +562,43 @@ static void test_lookup_sign_symmetry(void) {
     PASS();
 }
 
+/* ── Pre-baked tables match the pure compute function ──── */
+
+static void test_baked_tables_match_compute(void) {
+    TEST("baked tables == img_delta_compute_entry for every (mode,tier,scale,sign,tone,depth)");
+
+    for (uint8_t mode = 0; mode < IMG_MODE_MAX; mode++)
+    for (uint8_t tier = 0; tier < IMG_TIER_MAX; tier++)
+    for (uint8_t scale = 0; scale < IMG_SCALE_MAX; scale++)
+    for (uint8_t sign = 0; sign < IMG_SIGN_MAX; sign++)
+    for (uint8_t tone = 0; tone < IMG_TONE_BUCKETS; tone++)
+    for (uint8_t depth = 0; depth < IMG_DEPTH_BUCKETS; depth++) {
+        int16_t core, link, dch, prio;
+        uint8_t pat;
+        img_delta_compute_entry(mode, tier, scale, sign, tone, depth,
+                                &core, &link, &dch, &prio, &pat);
+        size_t i = img_delta_table_idx(mode, tier, scale, sign, tone, depth);
+        assert(g_core_table    [i] == core);
+        assert(g_link_table    [i] == link);
+        assert(g_delta_table   [i] == dch);
+        assert(g_priority_table[i] == prio);
+        assert(g_pattern_table [i] == pat);
+    }
+
+    /* Step tables too. */
+    for (uint8_t d = 0; d < IMG_FLOW_BUCKETS; d++)
+        for (uint8_t s = 0; s < IMG_SIGN_MAX; s++)
+            assert(g_direction_step[d][s] ==
+                   img_delta_compute_direction_step(d, s));
+
+    for (uint8_t d = 0; d < IMG_DEPTH_BUCKETS; d++)
+        for (uint8_t s = 0; s < IMG_SIGN_MAX; s++)
+            assert(g_depth_step[d][s] ==
+                   img_delta_compute_depth_step(d, s));
+
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -572,6 +618,9 @@ int main(void) {
     test_tables_init_idempotent_and_sized();
     test_lookup_covers_all_modes();
     test_lookup_sign_symmetry();
+
+    /* Pre-baked tables */
+    test_baked_tables_match_compute();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

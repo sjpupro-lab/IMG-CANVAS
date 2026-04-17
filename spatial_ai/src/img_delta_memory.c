@@ -1,15 +1,24 @@
 #include "img_delta_memory.h"
+#include "img_delta_compute.h"
 
 #include <stdlib.h>
 #include <string.h>
 
-/* ── small helpers ──────────────────────────────────────── */
+/* ── Baked SoA tables (src/img_delta_tables_data.c) ───────
+ *
+ * Generated offline by tools/gen_delta_tables. Linked in as plain
+ * compile-time const data — no runtime build, no init guard, no
+ * initialization cost. Regenerate with `make -C spatial_ai gen-tables`.
+ */
+extern const int16_t g_core_table    [IMG_DELTA_TABLE_N];
+extern const int16_t g_link_table    [IMG_DELTA_TABLE_N];
+extern const int16_t g_delta_table   [IMG_DELTA_TABLE_N];
+extern const int16_t g_priority_table[IMG_DELTA_TABLE_N];
+extern const uint8_t g_pattern_table [IMG_DELTA_TABLE_N];
+extern const uint8_t g_direction_step[IMG_FLOW_BUCKETS][IMG_SIGN_MAX];
+extern const uint8_t g_depth_step    [IMG_DEPTH_BUCKETS][IMG_SIGN_MAX];
 
-static inline int clamp_i(int v, int lo, int hi) {
-    if (v < lo) return lo;
-    if (v > hi) return hi;
-    return v;
-}
+/* ── small helpers ──────────────────────────────────────── */
 
 static inline uint8_t sat_add_u8(uint8_t a, int delta) {
     int v = (int)a + delta;
@@ -153,164 +162,24 @@ static const ImgStateKey FALLBACK_MASKS[FALLBACK_LEVELS] = {
 
 /* ── Interpretation: pure SoA lookup (SPEC §13.2) ──────────
  *
- * One bounded DeltaState, expanded via precomputed tables keyed by
- *   (mode, tier, scale, sign, tone, depth)
- * into channel values and a packed pattern byte that drives the
- * tag-override flags. Direction / depth step-clamps come from tiny
- * side tables indexed by (current_class, sign).
+ * Tables are *baked* — see src/img_delta_tables_data.c. Lookup is
+ * one indexed load per channel + a small flag dispatch. No runtime
+ * arithmetic over delta values, no init guard, no first-call cost.
  *
- * Each channel table is a flat int16 array of TABLE_N entries. The
- * pattern table is uint8 per entry, storing which overrides fire
- * and in what direction:
+ * Pattern byte layout (per entry):
  *   bits 0..1  direction_sign   (0 none, 1 POS, 2 NEG)
  *   bits 2..3  depth_sign       (same)
  *   bits 4..5  mood_sign_fire   (0 none, 1 POS, 2 NEG)
  *   bits 6..7  role_flag        (0 none, 1 promote UNKNOWN→OBJECT,
  *                                2 demote → UNKNOWN)
  *
- * Layout index (LSB→MSB order in the flat array):
- *   idx = mode
- *       + tier  × MODE_MAX
- *       + scale × MODE_MAX × TIER_MAX
- *       + sign  × MODE_MAX × TIER_MAX × SCALE_MAX
- *       + tone  × …
- *       + depth × …
+ * Index layout (LSB → MSB):
+ *   mode | tier | scale | sign | tone | depth
  */
 
-#define IMG_TONE_BUCKETS   3
-#define IMG_DEPTH_BUCKETS  3
-
-#define IMG_DELTA_TABLE_N  (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * \
-                            IMG_SIGN_MAX * IMG_TONE_BUCKETS *            \
-                            IMG_DEPTH_BUCKETS)
-
-static int16_t  g_core_table    [IMG_DELTA_TABLE_N];
-static int16_t  g_link_table    [IMG_DELTA_TABLE_N];
-static int16_t  g_delta_table   [IMG_DELTA_TABLE_N];
-static int16_t  g_priority_table[IMG_DELTA_TABLE_N];
-static uint8_t  g_pattern_table [IMG_DELTA_TABLE_N];
-
-/* Side tables for ±1 clamped steps. Size is small enough to sit
- * comfortably in L1. */
-#define IMG_FLOW_BUCKETS   5   /* FLOW_NONE..DIAGONAL_DOWN */
-static uint8_t g_direction_step[IMG_FLOW_BUCKETS][IMG_SIGN_MAX];
-static uint8_t g_depth_step    [IMG_DEPTH_BUCKETS][IMG_SIGN_MAX];
-
-static int g_tables_ready = 0;
-
-static inline size_t img_delta_table_idx(uint8_t mode, uint8_t tier,
-                                         uint8_t scale, uint8_t sign,
-                                         uint8_t tone, uint8_t depth) {
-    return (size_t)mode
-         + (size_t)tier  * IMG_MODE_MAX
-         + (size_t)scale * (IMG_MODE_MAX * IMG_TIER_MAX)
-         + (size_t)sign  * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX)
-         + (size_t)tone  * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * IMG_SIGN_MAX)
-         + (size_t)depth * (IMG_MODE_MAX * IMG_TIER_MAX * IMG_SCALE_MAX * IMG_SIGN_MAX * IMG_TONE_BUCKETS);
-}
-
-/* Tier base magnitudes (SPEC §10: T1 fine / T2 mid / T3 structure). */
-static const int TIER_MAGNITUDE[IMG_TIER_MAX] = { 0, 4, 12, 24 };
-/* Per-bucket multipliers used when mode + bucket interact. */
-static const int TONE_MULT_INTENSITY [IMG_TONE_BUCKETS ] = { 12,  6,  3 };
-static const int DEPTH_MULT_PRIORITY [IMG_DEPTH_BUCKETS] = {  3,  6, 10 };
-
-static void build_step_tables(void) {
-    for (int d = 0; d < IMG_FLOW_BUCKETS; d++) {
-        for (int s = 0; s < IMG_SIGN_MAX; s++) {
-            int up = d + 1, down = d - 1;
-            if (up   > IMG_FLOW_DIAGONAL_DOWN) up   = IMG_FLOW_DIAGONAL_DOWN;
-            if (down < 0)                      down = 0;
-            if (s == IMG_SIGN_POS)       g_direction_step[d][s] = (uint8_t)up;
-            else if (s == IMG_SIGN_NEG)  g_direction_step[d][s] = (uint8_t)down;
-            else                         g_direction_step[d][s] = (uint8_t)d;
-        }
-    }
-    for (int d = 0; d < IMG_DEPTH_BUCKETS; d++) {
-        for (int s = 0; s < IMG_SIGN_MAX; s++) {
-            int up = d + 1, down = d - 1;
-            if (up   > IMG_DEPTH_FOREGROUND) up   = IMG_DEPTH_FOREGROUND;
-            if (down < 0)                    down = 0;
-            if (s == IMG_SIGN_POS)       g_depth_step[d][s] = (uint8_t)up;
-            else if (s == IMG_SIGN_NEG)  g_depth_step[d][s] = (uint8_t)down;
-            else                         g_depth_step[d][s] = (uint8_t)d;
-        }
-    }
-}
-
-static void build_main_tables(void) {
-    for (uint8_t mode = 0; mode < IMG_MODE_MAX; mode++) {
-        for (uint8_t tier = 0; tier < IMG_TIER_MAX; tier++) {
-            for (uint8_t scale = 0; scale < IMG_SCALE_MAX; scale++) {
-                for (uint8_t sign = 0; sign < IMG_SIGN_MAX; sign++) {
-                    for (uint8_t tone = 0; tone < IMG_TONE_BUCKETS; tone++) {
-                        for (uint8_t depth = 0; depth < IMG_DEPTH_BUCKETS; depth++) {
-                            size_t idx = img_delta_table_idx(mode, tier, scale,
-                                                             sign, tone, depth);
-
-                            int16_t core = 0, link = 0, dch = 0, prio = 0;
-                            uint8_t pat  = 0;
-
-                            int sgn = (sign == IMG_SIGN_POS) ? +1
-                                    : (sign == IMG_SIGN_NEG) ? -1 : 0;
-
-                            if (tier != 0 && sgn != 0 && mode != IMG_MODE_NONE) {
-                                int base = TIER_MAGNITUDE[tier] * (2 + scale) / 2;
-
-                                switch (mode) {
-                                    case IMG_MODE_INTENSITY:
-                                        core = (int16_t)clamp_i(
-                                            sgn * base * TONE_MULT_INTENSITY[tone] / 4,
-                                            -200, 200);
-                                        break;
-                                    case IMG_MODE_LINK:
-                                        link = (int16_t)clamp_i(sgn * base, -120, 120);
-                                        break;
-                                    case IMG_MODE_PRIORITY:
-                                        prio = (int16_t)clamp_i(
-                                            sgn * base * DEPTH_MULT_PRIORITY[depth] / 4,
-                                            -200, 200);
-                                        break;
-                                    case IMG_MODE_MOOD:
-                                        dch = (int16_t)clamp_i(sgn * base, -120, 120);
-                                        /* mood_sign_fire bits 4..5 */
-                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 4);
-                                        break;
-                                    case IMG_MODE_DIRECTION:
-                                        /* direction_sign bits 0..1 */
-                                        pat |= (uint8_t)(sgn > 0 ? 1u : 2u);
-                                        break;
-                                    case IMG_MODE_DEPTH:
-                                        /* depth_sign bits 2..3 */
-                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 2);
-                                        break;
-                                    case IMG_MODE_ROLE:
-                                        /* role_flag bits 6..7 */
-                                        pat |= (uint8_t)((sgn > 0 ? 1u : 2u) << 6);
-                                        break;
-                                    default:
-                                        break;
-                                }
-                            }
-
-                            g_core_table    [idx] = core;
-                            g_link_table    [idx] = link;
-                            g_delta_table   [idx] = dch;
-                            g_priority_table[idx] = prio;
-                            g_pattern_table [idx] = pat;
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 void img_delta_tables_init(void) {
-    if (g_tables_ready) return;
-    build_step_tables();
-    build_main_tables();
-    g_tables_ready = 1;
+    /* No-op: tables are compile-time const, always ready. Kept as a
+     * stable entry-point so callers and tests don't need to change. */
 }
 
 uint32_t img_delta_tables_entry_count(void) {
@@ -330,7 +199,6 @@ void img_delta_interpret(const ImgCECell* cell,
     if (!out) return;
     memset(out, 0, sizeof(*out));
     if (!cell || !payload) return;
-    img_delta_tables_init();
 
     const ImgDeltaState s = payload->state;
     const uint8_t mode  = img_delta_state_mode(s);

@@ -19,6 +19,8 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/spatial_subtitle.c \
        $(SRC_DIR)/img_ce.c \
        $(SRC_DIR)/img_delta_memory.c \
+       $(SRC_DIR)/img_delta_compute.c \
+       $(SRC_DIR)/img_delta_tables_data.c \
        $(SRC_DIR)/img_set16.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
@@ -90,6 +92,20 @@ $(BUILD_DIR)/test_img_delta_memory: $(TEST_DIR)/test_img_delta_memory.c $(OBJS) 
 
 $(BUILD_DIR)/test_img_set16: $(TEST_DIR)/test_img_set16.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+# ─── CE delta tables: offline generator + baked data ─────────
+TOOLS_DIR = tools
+
+$(BUILD_DIR)/gen_delta_tables: $(TOOLS_DIR)/gen_delta_tables.c $(BUILD_DIR)/img_delta_compute.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(BUILD_DIR)/img_delta_compute.o -o $@ $(LDFLAGS)
+
+# Regenerate src/img_delta_tables_data.c from the generator. The
+# committed file should match this output — CI / a regression test
+# verifies that the running tables match img_delta_compute_entry.
+.PHONY: gen-tables
+gen-tables: $(BUILD_DIR)/gen_delta_tables
+	$(BUILD_DIR)/gen_delta_tables > $(SRC_DIR)/img_delta_tables_data.c
+	@echo "Regenerated $(SRC_DIR)/img_delta_tables_data.c"
 
 # ─── Wikipedia integration test (manual run) ─────────────────
 $(BUILD_DIR)/test_wiki: $(TEST_DIR)/test_wiki.c $(OBJS) | $(BUILD_DIR)
