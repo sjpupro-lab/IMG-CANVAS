@@ -515,3 +515,152 @@ void img_delta_apply(ImgCECell* cell,
         m->units[unit->id].usage_count++;
     }
 }
+
+/* ── Persistence ──────────────────────────────────────── */
+
+#include <stdio.h>
+
+#define IMEM_MAGIC    "IMEM"
+#define IMEM_VERSION  1u
+
+const char* img_delta_memory_status_str(ImemStatus s) {
+    switch (s) {
+        case IMEM_OK:          return "ok";
+        case IMEM_ERR_OPEN:    return "open";
+        case IMEM_ERR_READ:    return "short read";
+        case IMEM_ERR_WRITE:   return "short write";
+        case IMEM_ERR_MAGIC:   return "bad magic";
+        case IMEM_ERR_VERSION: return "unsupported version";
+        case IMEM_ERR_ALLOC:   return "allocation failed";
+    }
+    return "unknown";
+}
+
+/* 40 bytes on disk — fields packed explicitly, not struct-layout
+ * dependent. */
+static int imem_write_unit(FILE* fp, const ImgDeltaUnit* u) {
+    uint32_t state = u->payload.state;
+    uint8_t  hh    = u->has_post_hint;
+    uint8_t  rt    = u->payload.role_target;
+    uint8_t  rto   = u->payload.role_target_on;
+    uint8_t  pad1  = 0;
+    uint16_t pad2  = 0;
+
+    if (fwrite(&u->id,            4, 1, fp) != 1) return 0;
+    if (fwrite(&u->pre_key,       8, 1, fp) != 1) return 0;
+    if (fwrite(&u->post_hint,     8, 1, fp) != 1) return 0;
+    if (fwrite(&hh,               1, 1, fp) != 1) return 0;
+    if (fwrite(&rt,               1, 1, fp) != 1) return 0;
+    if (fwrite(&rto,              1, 1, fp) != 1) return 0;
+    if (fwrite(&pad1,             1, 1, fp) != 1) return 0;
+    if (fwrite(&state,            4, 1, fp) != 1) return 0;
+    if (fwrite(&u->usage_count,   4, 1, fp) != 1) return 0;
+    if (fwrite(&u->success_count, 4, 1, fp) != 1) return 0;
+    if (fwrite(&u->weight,        2, 1, fp) != 1) return 0;
+    if (fwrite(&pad2,             2, 1, fp) != 1) return 0;
+    return 1;
+}
+
+static int imem_read_unit(FILE* fp, ImgDeltaUnit* u) {
+    uint32_t state;
+    uint8_t  hh, rt, rto, pad1;
+    uint16_t pad2;
+
+    if (fread(&u->id,            4, 1, fp) != 1) return 0;
+    if (fread(&u->pre_key,       8, 1, fp) != 1) return 0;
+    if (fread(&u->post_hint,     8, 1, fp) != 1) return 0;
+    if (fread(&hh,               1, 1, fp) != 1) return 0;
+    if (fread(&rt,               1, 1, fp) != 1) return 0;
+    if (fread(&rto,              1, 1, fp) != 1) return 0;
+    if (fread(&pad1,             1, 1, fp) != 1) return 0;
+    if (fread(&state,            4, 1, fp) != 1) return 0;
+    if (fread(&u->usage_count,   4, 1, fp) != 1) return 0;
+    if (fread(&u->success_count, 4, 1, fp) != 1) return 0;
+    if (fread(&u->weight,        2, 1, fp) != 1) return 0;
+    if (fread(&pad2,             2, 1, fp) != 1) return 0;
+
+    memset(&u->payload, 0, sizeof(u->payload));
+    u->payload.state           = state;
+    u->payload.role_target     = rt;
+    u->payload.role_target_on  = rto;
+    u->has_post_hint           = hh;
+    u->_pad                    = 0;
+    return 1;
+}
+
+ImemStatus img_delta_memory_save(const ImgDeltaMemory* m, const char* path) {
+    if (!m || !path) return IMEM_ERR_OPEN;
+    FILE* fp = fopen(path, "wb");
+    if (!fp) return IMEM_ERR_OPEN;
+
+    uint32_t version = IMEM_VERSION;
+    uint32_t count   = m->count;
+    uint32_t reserved = 0;
+    if (fwrite(IMEM_MAGIC, 1, 4, fp)  != 4) { fclose(fp); return IMEM_ERR_WRITE; }
+    if (fwrite(&version,   4, 1, fp)  != 1) { fclose(fp); return IMEM_ERR_WRITE; }
+    if (fwrite(&count,     4, 1, fp)  != 1) { fclose(fp); return IMEM_ERR_WRITE; }
+    if (fwrite(&reserved,  4, 1, fp)  != 1) { fclose(fp); return IMEM_ERR_WRITE; }
+
+    for (uint32_t i = 0; i < m->count; i++) {
+        if (!imem_write_unit(fp, &m->units[i])) {
+            fclose(fp);
+            return IMEM_ERR_WRITE;
+        }
+    }
+
+    if (fclose(fp) != 0) return IMEM_ERR_WRITE;
+    return IMEM_OK;
+}
+
+ImgDeltaMemory* img_delta_memory_load(const char* path,
+                                      ImemStatus* out_status) {
+    if (out_status) *out_status = IMEM_OK;
+    if (!path) { if (out_status) *out_status = IMEM_ERR_OPEN; return NULL; }
+
+    FILE* fp = fopen(path, "rb");
+    if (!fp) { if (out_status) *out_status = IMEM_ERR_OPEN; return NULL; }
+
+    char     magic[4];
+    uint32_t version, count, reserved;
+    if (fread(magic,    1, 4, fp) != 4 ||
+        fread(&version, 4, 1, fp) != 1 ||
+        fread(&count,   4, 1, fp) != 1 ||
+        fread(&reserved,4, 1, fp) != 1) {
+        fclose(fp); if (out_status) *out_status = IMEM_ERR_READ; return NULL;
+    }
+    if (memcmp(magic, IMEM_MAGIC, 4) != 0) {
+        fclose(fp); if (out_status) *out_status = IMEM_ERR_MAGIC; return NULL;
+    }
+    if (version != IMEM_VERSION) {
+        fclose(fp); if (out_status) *out_status = IMEM_ERR_VERSION; return NULL;
+    }
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    if (!m) {
+        fclose(fp); if (out_status) *out_status = IMEM_ERR_ALLOC; return NULL;
+    }
+
+    /* Ensure capacity for the whole batch up front. */
+    while (m->capacity < count) {
+        if (!memory_grow(m)) {
+            img_delta_memory_destroy(m); fclose(fp);
+            if (out_status) *out_status = IMEM_ERR_ALLOC;
+            return NULL;
+        }
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        ImgDeltaUnit u;
+        memset(&u, 0, sizeof(u));
+        if (!imem_read_unit(fp, &u)) {
+            img_delta_memory_destroy(m); fclose(fp);
+            if (out_status) *out_status = IMEM_ERR_READ;
+            return NULL;
+        }
+        m->units[i] = u;
+    }
+    m->count = count;
+
+    fclose(fp);
+    return m;
+}

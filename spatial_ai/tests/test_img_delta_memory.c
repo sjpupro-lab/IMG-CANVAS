@@ -784,6 +784,97 @@ static void test_weight_is_tiebreaker_not_filter(void) {
     PASS();
 }
 
+/* ── persistence: save/load roundtrip ───────────────────── */
+
+static void test_memory_save_load_roundtrip(void) {
+    TEST("save then load reproduces every unit field byte-for-byte");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+
+    /* Mixed inserts: default weight, weighted, with post_hint, with
+     * role_target flag. Record some usage/success so those fields
+     * travel too. */
+    ImgDeltaPayload p1 = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                        IMG_MODE_INTENSITY);
+    ImgStateKey k1 = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
+                                        IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
+                                        2, IMG_DELTA_NONE);
+    uint32_t id1 = img_delta_memory_add(m, k1, p1);
+    img_delta_memory_record_usage(m, id1, 1);
+    img_delta_memory_record_usage(m, id1, 0);
+    img_delta_memory_record_usage(m, id1, 1);
+
+    ImgDeltaPayload p2;
+    memset(&p2, 0, sizeof(p2));
+    p2.state = img_delta_state_simple(IMG_TIER_T2, 3, IMG_SIGN_NEG,
+                                      IMG_MODE_ROLE);
+    p2.role_target    = IMG_ROLE_FACE;
+    p2.role_target_on = 1;
+    ImgStateKey k2 = img_state_key_make(IMG_ROLE_PERSON, IMG_TONE_BRIGHT,
+                                        IMG_FLOW_HORIZONTAL,
+                                        IMG_DEPTH_MIDGROUND,
+                                        5, IMG_DELTA_POSITIVE);
+    ImgStateKey hint2 = img_state_key_make(IMG_ROLE_FACE, IMG_TONE_BRIGHT,
+                                           IMG_FLOW_HORIZONTAL,
+                                           IMG_DEPTH_FOREGROUND,
+                                           5, IMG_DELTA_POSITIVE);
+    uint32_t id2 = img_delta_memory_add_with_hint(m, k2, p2, hint2);
+    (void)id2;
+
+    uint32_t id3 = img_delta_memory_add_weighted(m, k1, p1, 4000);
+    (void)id3;
+
+    assert(img_delta_memory_count(m) == 3);
+
+    const char* path = "build/test_img_delta_memory.imem";
+    assert(img_delta_memory_save(m, path) == IMEM_OK);
+
+    ImemStatus st = IMEM_OK;
+    ImgDeltaMemory* m2 = img_delta_memory_load(path, &st);
+    assert(st == IMEM_OK);
+    assert(m2);
+    assert(img_delta_memory_count(m2) == 3);
+
+    for (uint32_t i = 0; i < 3; i++) {
+        const ImgDeltaUnit* a = img_delta_memory_get(m,  i);
+        const ImgDeltaUnit* b = img_delta_memory_get(m2, i);
+        assert(a && b);
+        assert(a->id             == b->id);
+        assert(a->pre_key        == b->pre_key);
+        assert(a->post_hint      == b->post_hint);
+        assert(a->has_post_hint  == b->has_post_hint);
+        assert(a->payload.state               == b->payload.state);
+        assert(a->payload.role_target         == b->payload.role_target);
+        assert(a->payload.role_target_on      == b->payload.role_target_on);
+        assert(a->usage_count    == b->usage_count);
+        assert(a->success_count  == b->success_count);
+        assert(a->weight         == b->weight);
+    }
+
+    img_delta_memory_destroy(m2);
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
+static void test_memory_load_rejects_bad_magic(void) {
+    TEST("load on a non-IMEM file returns IMEM_ERR_MAGIC");
+
+    const char* path = "build/test_img_delta_memory_badmagic.imem";
+    FILE* f = fopen(path, "wb");
+    assert(f);
+    /* 16 bytes of garbage — right size, wrong magic. */
+    const char garbage[16] = "NOPE\0\0\0\0\0\0\0\0\0\0\0\0";
+    assert(fwrite(garbage, 1, 16, f) == 16);
+    fclose(f);
+
+    ImemStatus st = IMEM_OK;
+    ImgDeltaMemory* m = img_delta_memory_load(path, &st);
+    assert(m == NULL);
+    assert(st == IMEM_ERR_MAGIC);
+
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -815,6 +906,10 @@ int main(void) {
     test_weight_default_and_weighted_add();
     test_weight_nudges_score();
     test_weight_is_tiebreaker_not_filter();
+
+    /* Persistence */
+    test_memory_save_load_roundtrip();
+    test_memory_load_rejects_bad_magic();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;
