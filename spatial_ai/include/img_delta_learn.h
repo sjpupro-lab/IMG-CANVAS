@@ -56,4 +56,33 @@ uint32_t img_delta_memory_learn_from_images(ImgDeltaMemory* memory,
                                             uint32_t after_w,
                                             uint32_t after_h);
 
+/* Multi-scale learn from a single image.
+ *
+ *   Blur cascade: for each radius in `blur_radii` (sorted largest
+ *   first = coarsest first), produce a box-blurred copy. Consecutive
+ *   pairs are used as (before=coarser, after=finer):
+ *
+ *     blur_radii = {16, 4, 0}
+ *       → pair A: before = blur(16), after = blur(4)   // coarse→mid
+ *       → pair B: before = blur(4),  after = blur(0)   // mid→fine
+ *
+ *   Each pair runs learn_from_images, so deltas capture the detail
+ *   added at that step of the cascade. The rarity sieve in
+ *   img_delta_memory_add naturally places first-seen patterns at
+ *   high weight, so coarse-only signals (present early, absent
+ *   later) and fine-only signals (late-only) end up in different
+ *   weight buckets — the engine's "detail-per-region" axis is
+ *   derived for free from the blur cascade.
+ *
+ *   `blur_radii` must have ≥ 2 entries and be sorted descending
+ *   (largest radius first). Returns total DeltaUnits inserted.
+ *   Zero-sized images or < 2 radii return 0 with no side effects.
+ */
+uint32_t img_delta_memory_learn_multiscale(ImgDeltaMemory* memory,
+                                           const uint8_t* image_rgb,
+                                           uint32_t image_w,
+                                           uint32_t image_h,
+                                           const uint32_t* blur_radii,
+                                           uint32_t n_radii);
+
 #endif /* IMG_DELTA_LEARN_H */
