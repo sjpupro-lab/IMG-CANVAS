@@ -82,10 +82,11 @@ spatial_ai/
 │   ├── img_delta_tables_data.c    AUTO-GENERATED baked tables
 │   └── ... (one .c per header)
 ├── tests/
-│   └── test_img_*.c               67 unit tests covering every module
+│   └── test_img_*.c               69 unit tests covering every module
 ├── tools/
 │   ├── gen_delta_tables.c         offline table generator
-│   └── demo_pipeline.c            CLI for visual inspection
+│   ├── demo_pipeline.c            CLI for visual inspection
+│   └── train.c                    batch training: manifest → .spai + .imem
 └── third_party/
     ├── stb_image.h                PNG/JPEG/BMP/TGA reader (public domain)
     └── stb_image_write.h          PNG writer
@@ -98,7 +99,7 @@ spatial_ai/
 ```bash
 cd spatial_ai
 make            # build all objects
-make test       # 67 new img_* tests in the CE stack, plus text-engine suites
+make test       # 69 new img_* tests in the CE stack, plus text-engine suites
 ```
 
 Regenerate the baked delta tables (only needed after changing
@@ -144,6 +145,56 @@ make demo
 
 ---
 
+## Training — batch learning from a manifest
+
+```bash
+cd spatial_ai
+make train
+
+# Manifest rows: <label>\t<before_image>\t<after_image>
+./build/train --model out.spai --memory out.imem data/train_manifest.tsv
+```
+
+Each row:
+1. loads before + after (PNG / JPEG / BMP via stb_image, or raw PPM)
+2. runs `img_delta_memory_learn_from_images` — appends rarity-weighted symbolic deltas to the memory
+3. stores a text keyframe with the label (so text-side matching can find it later)
+4. runs the full image pipeline on the `after` image (with the accumulated memory) and binds the resulting `ImgCEGrid` to the keyframe via `ai_bind_image_to_kf`
+
+Persistence: the two output files are **compact binary** and round-trip cleanly.
+
+- `out.spai` — SpatialAI (text keyframes, deltas, channel weights, canvas pool, bimodal CE snapshots). Existing `ai_save` / `ai_load` plus the new `SPAI_TAG_CE_SNAPSHOT` trailing record.
+- `out.imem` — DeltaMemory (`IMEM` magic, 40 bytes per unit, all fields explicit little-endian — independent of struct layout).
+
+`--resume` loads the existing files and keeps appending. A second pass on the same manifest doubles unit count and CE bindings, which makes it easy to run repeated training rounds and watch memory grow while rarity-weighted inserts stay rare.
+
+### Sample run on the bundled PNGs
+
+```
+./build/train --model out.spai --memory out.imem data/train_manifest.tsv
+  [1] hero to visualization 1                   +3734 deltas  kf=0  ce=yes
+  [2] visualization 1 to hero                   +3734 deltas  kf=1  ce=yes
+  [3] hero to visualization 2                   +3750 deltas  kf=2  ce=yes
+  [4] visualization 2 to hero                   +3750 deltas  kf=3  ce=yes
+  [5] visualization 1 to visualization 2        +3911 deltas  kf=4  ce=yes
+  [6] visualization 2 to visualization 1        +3911 deltas  kf=5  ce=yes
+
+=== train summary ===
+  manifest rows:    6 (6 ok)
+  deltas added:     22790
+  units (after):    22790
+  weight buckets:
+    = 1000 (base):  22698
+    2000-3999    :  46
+    >=4000 (rare):  46
+  keyframes:        6
+  ce snapshots:     6
+```
+
+46 / 46 patterns tripped the first- and second-of-bucket rarity boost; the rest hit the L2 bucket as "seen" and collapsed to baseline weight. That's the hierarchical sieve in action — rare patterns get the learning-rate push, common ones don't, nothing gets filtered out.
+
+---
+
 ## Testing
 
 ```bash
@@ -155,7 +206,7 @@ Covers (in new CE stack):
 | Module | Tests |
 |---|---|
 | `img_ce` — SmallCanvas / CE grid / resolve | 6 |
-| `img_delta_memory` — StateKey pack, fallback chain, Laplace scoring, apply constraints, baked tables regression, auto-feedback, weight (default / weighted add / score nudge / tiebreak-not-filter) | 20 |
+| `img_delta_memory` — StateKey pack, fallback chain, Laplace scoring, apply constraints, baked tables regression, auto-feedback, weight (default / weighted add / score nudge / tiebreak-not-filter), save/load roundtrip + bad-magic rejection | 22 |
 | `img_set16` — layout/sizes, quad indices, CE ↔ Set16 roundtrip, edge clipping | 5 |
 | `img_render` — default options, empty grid, per-channel SlotShape, tier-4 bleed, PPM save, mask tints | 7 |
 | `img_pipeline` — defaults, seed-fraction bounds, memory-driven expansion, pipeline → render, masks flow, feedback ingest | 7 |

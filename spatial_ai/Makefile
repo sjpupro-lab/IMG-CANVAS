@@ -145,6 +145,18 @@ demo: $(BUILD_DIR)/demo_pipeline
 	@echo "  Reads PNG/JPEG/BMP/TGA via stb_image, or P6 PPM directly."
 	@echo "  Writes both .png and .ppm next to <out_prefix>."
 
+# ─── Training CLI: manifest → .spai + .imem ──────────────────
+$(BUILD_DIR)/train: $(TOOLS_DIR)/train.c $(OBJS) \
+                     $(BUILD_DIR)/stb_image_impl.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(THIRD_PARTY_DIR) $< $(OBJS) \
+	      $(BUILD_DIR)/stb_image_impl.o -o $@ $(LDFLAGS)
+
+.PHONY: train
+train: $(BUILD_DIR)/train
+	@echo "Built train. Usage:"
+	@echo "  ./build/train [--resume] [--model foo.spai] [--memory foo.imem] manifest.tsv"
+	@echo "  Manifest: <label>\\t<before_image>\\t<after_image> per row."
+
 # Regenerate src/img_delta_tables_data.c from the generator. The
 # committed file should match this output — CI / a regression test
 # verifies that the running tables match img_delta_compute_entry.

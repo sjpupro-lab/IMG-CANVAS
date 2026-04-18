@@ -296,4 +296,50 @@ void            img_delta_apply(ImgCECell* cell,
                                 ImgDeltaMemory* m,
                                 const ImgDeltaUnit* unit);
 
+/* ── Persistence ──────────────────────────────────────────
+ *
+ * Compact binary format "IMEM" — header (16 bytes) + N records
+ * of 40 bytes each (packed explicitly, little-endian native).
+ *   magic[4]      = "IMEM"
+ *   version       = uint32
+ *   count         = uint32
+ *   reserved      = uint32
+ *   records[count]:
+ *     id                  u32
+ *     pre_key             u64
+ *     post_hint           u64
+ *     has_post_hint       u8
+ *     payload.role_target u8
+ *     payload.role_target_on u8
+ *     _pad                u8   (align to next field)
+ *     payload.state       u32
+ *     usage_count         u32
+ *     success_count       u32
+ *     weight              u16
+ *     _pad                u16
+ *
+ * Older readers that don't understand a newer `version` return
+ * IMEM_ERR_VERSION; the format is bumped only when the record
+ * layout changes. */
+typedef enum {
+    IMEM_OK = 0,
+    IMEM_ERR_OPEN,
+    IMEM_ERR_READ,
+    IMEM_ERR_WRITE,
+    IMEM_ERR_MAGIC,
+    IMEM_ERR_VERSION,
+    IMEM_ERR_ALLOC
+} ImemStatus;
+
+const char*      img_delta_memory_status_str(ImemStatus s);
+
+/* Write every unit in `m` to `path`. Returns IMEM_OK on success. */
+ImemStatus       img_delta_memory_save(const ImgDeltaMemory* m,
+                                       const char* path);
+
+/* Allocate a fresh ImgDeltaMemory and populate it from `path`.
+ * Returns NULL on failure; out_status (if non-NULL) is written. */
+ImgDeltaMemory*  img_delta_memory_load(const char* path,
+                                       ImemStatus* out_status);
+
 #endif /* IMG_DELTA_MEMORY_H */
