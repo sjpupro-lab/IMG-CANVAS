@@ -106,4 +106,14 @@ SpaiStatus ai_peek_header(const char* path,
                           uint32_t* out_df_count,
                           uint32_t* out_version);
 
+/* Extended peek: additionally reports reserved[0] = the unix
+ * timestamp captured at last save (uint32 seconds). Zero indicates
+ * a file saved by a pre-timestamp build. Any of the `out_*` pointers
+ * may be NULL. */
+SpaiStatus ai_peek_header_ex(const char* path,
+                             uint32_t* out_kf_count,
+                             uint32_t* out_df_count,
+                             uint32_t* out_version,
+                             uint32_t* out_save_timestamp);
+
 #endif /* SPATIAL_IO_H */

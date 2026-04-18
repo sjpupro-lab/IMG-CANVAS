@@ -340,6 +340,42 @@ static void test_state_error(void) {
     PASS();
 }
 
+/* ── Header timestamp (reserved[0]) ────────────────────── */
+
+#include <time.h>
+
+static void test_peek_header_ex_timestamp(void) {
+    TEST("peek_header_ex returns a non-zero save timestamp");
+
+    SpatialAI* ai = spatial_ai_create();
+    ai_force_keyframe(ai, "timestamp-probe clause", "t0");
+
+    const char* path = "build/test_io_ts.spai";
+    time_t before = time(NULL);
+    assert(ai_save(ai, path) == SPAI_OK);
+    time_t after = time(NULL);
+
+    uint32_t kf = 0, df = 0, ver = 0, ts = 0;
+    assert(ai_peek_header_ex(path, &kf, &df, &ver, &ts) == SPAI_OK);
+
+    assert(kf >= 1);
+    assert(ver > 0);
+    assert(ts > 0);
+    /* Timestamp must fall in [before-1, after+1] second window. */
+    assert((time_t)ts >= before - 1);
+    assert((time_t)ts <= after + 1);
+
+    /* Backwards-compatible call still works and returns the same
+     * kf / df / ver. */
+    uint32_t kf2 = 0, df2 = 0, ver2 = 0;
+    assert(ai_peek_header(path, &kf2, &df2, &ver2) == SPAI_OK);
+    assert(kf2 == kf && df2 == df && ver2 == ver);
+
+    spatial_ai_destroy(ai);
+    remove(path);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_io ===\n");
 
@@ -357,6 +393,7 @@ int main(void) {
     test_truncated();
     test_incremental_new_file();
     test_state_error();
+    test_peek_header_ex_timestamp();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

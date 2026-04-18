@@ -1,5 +1,6 @@
 #include "img_pipeline.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -14,6 +15,19 @@ ImgPipelineOptions img_pipeline_default_options(void) {
     o.feedback          = 1;        /* auto-ingest resolve outcomes */
     return o;
 }
+
+/* Defensive dim bounds for the ingest path.
+ *   IMG_PIPELINE_MIN_DIM guards against degenerate 1×1 inputs that
+ *     produce a uniform CE grid and waste a keyframe slot.
+ *   IMG_PIPELINE_MAX_DIM guards against arbitrarily large uploads
+ *     (satellite imagery, 40k×40k dumps) that would make the
+ *     block-averaging loop dominate ingest time. 16384 covers 4K /
+ *     8K photos with headroom; oversize inputs are rejected so the
+ *     caller can downscale explicitly.
+ * `img_image_to_small_canvas` is safe for any dim — these bounds are
+ * policy at the pipeline boundary, not correctness. */
+#define IMG_PIPELINE_MIN_DIM  16u
+#define IMG_PIPELINE_MAX_DIM  16384u
 
 /* ── seed selection: top-K by priority, raster-order tiebreak ── */
 
@@ -39,6 +53,15 @@ int img_pipeline_run(const uint8_t* image_rgb,
                      ImgPipelineResult* out) {
     if (!image_rgb || !out)         return 0;
     if (image_w == 0 || image_h == 0) return 0;
+
+    if (image_w < IMG_PIPELINE_MIN_DIM || image_h < IMG_PIPELINE_MIN_DIM ||
+        image_w > IMG_PIPELINE_MAX_DIM || image_h > IMG_PIPELINE_MAX_DIM) {
+        fprintf(stderr,
+                "[img_pipeline] reject %ux%u: outside [%u..%u] per side\n",
+                image_w, image_h,
+                IMG_PIPELINE_MIN_DIM, IMG_PIPELINE_MAX_DIM);
+        return 0;
+    }
 
     memset(out, 0, sizeof(*out));
 
