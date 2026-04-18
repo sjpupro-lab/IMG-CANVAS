@@ -9,14 +9,35 @@ ImgDrawingOptions img_drawing_default_options(void) {
     o.presence_penalty = 0.5;
     o.passes           = 1;
     o.skip_zero_cells  = 0;
+
+    o.region_mask  = NULL;
+    o.target_tier  = 0;       /* no tier preference */
+    o.tier_bonus   = 0.25;
+    o.target_role  = 0;       /* no role preference */
+    o.role_bonus   = 0.20;
     return o;
+}
+
+void img_brush_mask_rect(uint8_t* mask,
+                         uint32_t x0, uint32_t y0,
+                         uint32_t x1, uint32_t y1) {
+    if (!mask) return;
+    memset(mask, 0, IMG_CE_TOTAL);
+    if (x1 > IMG_CE_SIZE) x1 = IMG_CE_SIZE;
+    if (y1 > IMG_CE_SIZE) y1 = IMG_CE_SIZE;
+    if (x0 >= x1 || y0 >= y1) return;
+    for (uint32_t y = y0; y < y1; y++) {
+        for (uint32_t x = x0; x < x1; x++) {
+            mask[img_ce_idx(y, x)] = 1;
+        }
+    }
 }
 
 int img_drawing_pass(ImgCEGrid* grid,
                      ImgDeltaMemory* memory,
                      const ImgDrawingOptions* opts_or_null,
                      ImgDrawingStats* out_stats) {
-    ImgDrawingStats local = {0, 0, 0, 0};
+    ImgDrawingStats local = {0, 0, 0, 0, 0, 0};
 
     if (!grid || !grid->cells || !memory ||
         img_delta_memory_count(memory) == 0) {
@@ -45,10 +66,18 @@ int img_drawing_pass(ImgCEGrid* grid,
     if (opt.top_g > MAX_G) opt.top_g = MAX_G;
 
     const uint32_t n_cells = grid->width * grid->height;
+    const int brush_active = (opt.target_tier != 0) ||
+                             (opt.target_role != 0);
 
     for (uint32_t pass = 0; pass < opt.passes; pass++) {
         for (uint32_t i = 0; i < n_cells; i++) {
             ImgCECell* cell = &grid->cells[i];
+
+            /* Brush region gate — skip entirely, don't count as visited. */
+            if (opt.region_mask && !opt.region_mask[i]) {
+                local.cells_masked_out++;
+                continue;
+            }
 
             if (opt.skip_zero_cells && cell->core == 0) continue;
 
@@ -61,8 +90,37 @@ int img_drawing_pass(ImgCEGrid* grid,
                 candidates, scores, &level);
             if (n == 0) continue;
 
-            /* Greedy pick — penalty already diversifies the choice. */
-            const ImgDeltaUnit* picked = candidates[0];
+            /* Brush re-score: bias candidates whose payload tier or
+             * pre_key role matches the brush target. If the bonus
+             * changes the ranking, remember it (for stats). */
+            uint32_t pick_idx = 0;
+            if (brush_active) {
+                double   best_score = scores[0];
+                uint32_t orig_winner = 0;
+
+                for (uint32_t j = 0; j < n; j++) {
+                    double s = scores[j];
+                    if (opt.target_tier != 0) {
+                        uint8_t ut = img_delta_state_tier(
+                                       candidates[j]->payload.state);
+                        if (ut == opt.target_tier) s += opt.tier_bonus;
+                    }
+                    if (opt.target_role != 0) {
+                        uint8_t ur = img_state_key_semantic_role(
+                                       candidates[j]->pre_key);
+                        if (ur == opt.target_role) s += opt.role_bonus;
+                    }
+                    scores[j] = s;
+                    if (s > best_score) {
+                        best_score = s;
+                        pick_idx   = j;
+                    }
+                    (void)orig_winner;
+                }
+                if (pick_idx != 0) local.brush_bonus_wins++;
+            }
+
+            const ImgDeltaUnit* picked = candidates[pick_idx];
             img_delta_apply(cell, memory, picked);
 
             if (picked->id < mem_count) {

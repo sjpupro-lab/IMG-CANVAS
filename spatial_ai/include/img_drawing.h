@@ -46,11 +46,40 @@ typedef struct {
     uint32_t passes;             /* drawing iterations over the grid; default 1 */
     int      skip_zero_cells;    /* 1 = skip cells with core==0 (seed-only focus);
                                   * 0 = stamp every cell (full blank-canvas fill) */
+
+    /* ── Brush controls (all optional) ────────────────────
+     *
+     * Together these turn drawing_pass into a region-aware brush.
+     * A single delta memory can produce radically different output
+     * depending on the brush: "paint the face region at tier-3 detail"
+     * vs. "paint the background at tier-1" — same engine, same
+     * memory, different tier / role / mask dials. */
+
+    /* Per-cell gate: cells where region_mask[i] == 0 are skipped
+     * entirely (not visited, no stamp). Expected size
+     * IMG_CE_TOTAL bytes. NULL = "no mask" = every cell eligible. */
+    const uint8_t* region_mask;
+
+    /* Preferred payload tier for this pass. 0 = no preference.
+     * Non-zero values add `tier_bonus` to the score of every top-G
+     * candidate whose payload.state's tier_idx matches, then the
+     * best post-bonus candidate is picked. */
+    uint8_t  target_tier;        /* 0 or IMG_TIER_T1 / T2 / T3 */
+    double   tier_bonus;         /* default 0.25 when brush active */
+
+    /* Preferred cell semantic_role. 0 = no preference.
+     * When non-zero, candidates whose pre_key.semantic_role matches
+     * gain `role_bonus`. Useful for painting a face region with
+     * deltas learned on face cells. */
+    uint8_t  target_role;        /* 0 or IMG_ROLE_* */
+    double   role_bonus;         /* default 0.20 when brush active */
 } ImgDrawingOptions;
 
 typedef struct {
     uint32_t stamps_applied;     /* # of successful img_delta_apply calls */
     uint32_t cells_visited;      /* cells we considered stamping (post-filter) */
+    uint32_t cells_masked_out;   /* cells skipped by region_mask */
+    uint32_t brush_bonus_wins;   /* picks where tier/role bonus changed the winner */
     uint32_t unique_deltas_used; /* distinct delta ids picked at least once */
     uint32_t max_recent_count;   /* highest value in the recent_counts table */
 } ImgDrawingStats;
@@ -70,5 +99,12 @@ int img_drawing_pass(ImgCEGrid* grid,
                      ImgDeltaMemory* memory,
                      const ImgDrawingOptions* opts_or_null,
                      ImgDrawingStats* out_stats_or_null);
+
+/* Convenience: fill `mask` (size IMG_CE_TOTAL) with 1s inside the
+ * rectangle [x0, x1) × [y0, y1) and 0s elsewhere. Bounds are
+ * clamped to the grid. `mask` must be pre-allocated by the caller. */
+void img_brush_mask_rect(uint8_t* mask,
+                         uint32_t x0, uint32_t y0,
+                         uint32_t x1, uint32_t y1);
 
 #endif /* IMG_DRAWING_H */
