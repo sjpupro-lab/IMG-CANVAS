@@ -875,6 +875,106 @@ static void test_memory_load_rejects_bad_magic(void) {
     PASS();
 }
 
+/* ── Top-G sampling ─────────────────────────────────────── */
+
+static void test_topg_returns_up_to_g_sorted(void) {
+    TEST("topg returns ≤ G candidates sorted by descending score");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+
+    /* Seed 5 units under the exact same key so they all match L0.
+     * Give each a distinct success record so scores differ
+     * monotonically. */
+    ImgStateKey k = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
+                                       IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
+                                       0, IMG_DELTA_NONE);
+    for (uint32_t i = 0; i < 5; i++) {
+        uint32_t id = img_delta_memory_add(m, k, p);
+        /* Smooth: unit i wins i successes out of (i+1) attempts. */
+        for (uint32_t j = 0; j < i + 1; j++) {
+            img_delta_memory_record_usage(m, id, (j < i) ? 1 : 0);
+        }
+    }
+
+    ImgCECell cur;
+    make_cell(&cur, IMG_ROLE_OBJECT, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
+
+    const ImgDeltaUnit* out[3];
+    double scores[3];
+    int level = -2;
+    uint32_t n = img_delta_memory_topg(m, &cur, 3, NULL, 0.0,
+                                       out, scores, &level);
+    assert(n == 3);
+    assert(level == 0);
+    /* Descending by score. */
+    assert(scores[0] >= scores[1]);
+    assert(scores[1] >= scores[2]);
+    /* The 3 winners must be distinct. */
+    assert(out[0] != out[1] && out[1] != out[2] && out[0] != out[2]);
+
+    /* G larger than candidate pool: returns candidate count. */
+    const ImgDeltaUnit* big_out[20];
+    uint32_t big_n = img_delta_memory_topg(m, &cur, 20, NULL, 0.0,
+                                           big_out, NULL, NULL);
+    assert(big_n == 5);   /* capped at available */
+
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
+static void test_topg_presence_penalty_reorders(void) {
+    TEST("recent_counts + penalty_alpha reorder topg results");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+    ImgStateKey k = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
+                                       IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
+                                       0, IMG_DELTA_NONE);
+
+    /* Unit 0 scores higher than unit 1 when no penalty (0 = 50/100
+     * veteran; 1 = fresh 0/0). */
+    uint32_t id0 = img_delta_memory_add(m, k, p);
+    for (int i = 0; i < 100; i++) {
+        img_delta_memory_record_usage(m, id0, (i < 50) ? 1 : 0);
+    }
+    uint32_t id1 = img_delta_memory_add(m, k, p);
+
+    ImgCECell cur;
+    make_cell(&cur, IMG_ROLE_OBJECT, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
+
+    /* Without penalty: id0 comes first. */
+    {
+        const ImgDeltaUnit* out[2];
+        uint32_t n = img_delta_memory_topg(m, &cur, 2, NULL, 0.0,
+                                           out, NULL, NULL);
+        assert(n == 2);
+        assert(out[0]->id == id0);
+        assert(out[1]->id == id1);
+    }
+
+    /* Penalty: mark id0 as recently picked a few times, and id1
+     * never. With α=0.5, id0 loses 3 × 0.5 = 1.5 score → id1 wins. */
+    uint32_t recent[2] = {0, 0};
+    recent[id0] = 3;
+    recent[id1] = 0;
+    {
+        const ImgDeltaUnit* out[2];
+        uint32_t n = img_delta_memory_topg(m, &cur, 2, recent, 0.5,
+                                           out, NULL, NULL);
+        assert(n == 2);
+        assert(out[0]->id == id1);  /* flipped */
+        assert(out[1]->id == id0);
+    }
+
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -906,6 +1006,10 @@ int main(void) {
     test_weight_default_and_weighted_add();
     test_weight_nudges_score();
     test_weight_is_tiebreaker_not_filter();
+
+    /* Top-G sampling */
+    test_topg_returns_up_to_g_sorted();
+    test_topg_presence_penalty_reorders();
 
     /* Persistence */
     test_memory_save_load_roundtrip();

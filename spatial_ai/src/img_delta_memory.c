@@ -426,6 +426,57 @@ const ImgDeltaUnit* img_delta_memory_best(const ImgDeltaMemory* m,
     return best;
 }
 
+uint32_t img_delta_memory_topg(const ImgDeltaMemory* m,
+                               const ImgCECell* current,
+                               uint32_t G,
+                               const uint32_t* recent_counts,
+                               double penalty_alpha,
+                               const ImgDeltaUnit** out_units,
+                               double* out_scores,
+                               int* out_level) {
+    if (out_level) *out_level = -1;
+    if (!m || !current || !out_units || G == 0) return 0;
+
+    ImgStateKey key = img_state_key_from_cell(current);
+    enum { MAX_CAND = 32 };
+    const ImgDeltaUnit* cand[MAX_CAND];
+    int level = -1;
+    uint32_t n = img_delta_memory_candidates(m, key, cand, MAX_CAND, &level);
+    if (n == 0) return 0;
+
+    double scores[MAX_CAND];
+    for (uint32_t i = 0; i < n; i++) {
+        double s = img_delta_score(cand[i], current, level);
+        if (recent_counts) {
+            s -= penalty_alpha * (double)recent_counts[cand[i]->id];
+        }
+        scores[i] = s;
+    }
+
+    /* Partial insertion sort descending — up to G entries. n ≤ 32 so
+     * full sort is cheap. */
+    uint32_t write = (G < n) ? G : n;
+    for (uint32_t slot = 0; slot < write; slot++) {
+        uint32_t best_i = slot;
+        for (uint32_t j = slot + 1; j < n; j++) {
+            if (scores[j] > scores[best_i]) best_i = j;
+        }
+        if (best_i != slot) {
+            const ImgDeltaUnit* tu = cand[slot];
+            double ts = scores[slot];
+            cand[slot] = cand[best_i];
+            scores[slot] = scores[best_i];
+            cand[best_i] = tu;
+            scores[best_i] = ts;
+        }
+        out_units[slot] = cand[slot];
+        if (out_scores) out_scores[slot] = scores[slot];
+    }
+
+    if (out_level) *out_level = level;
+    return write;
+}
+
 void img_delta_memory_record_usage(ImgDeltaMemory* m,
                                    uint32_t delta_id, int success) {
     if (!m || delta_id >= m->count) return;

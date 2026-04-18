@@ -256,6 +256,31 @@ const ImgDeltaUnit* img_delta_memory_best(const ImgDeltaMemory* m,
                                            double* out_score,
                                            int* out_level);
 
+/* Top-G selection with optional presence penalty — analogue of a
+ * language model's top-k sampling, adapted to per-cell delta choice.
+ *
+ *   1. Collect candidates via the same fallback chain as _best.
+ *   2. Score each with img_delta_score(..., fallback_level).
+ *   3. If `recent_counts` is non-NULL, subtract
+ *        penalty_alpha × (double)recent_counts[unit->id]
+ *      from each score. Drives diversity within a single drawing
+ *      pass: a delta picked often in recent stamps loses score
+ *      proportionally, giving under-used alternatives a chance.
+ *   4. Sort descending by adjusted score; copy up to G into
+ *      out_units (and out_scores if provided).
+ *
+ * `recent_counts` must be sized ≥ img_delta_memory_count(m) when set.
+ * Returns the number of entries written (≤ G). Writes the fallback
+ * level into *out_level when non-NULL (same semantics as _best). */
+uint32_t img_delta_memory_topg(const ImgDeltaMemory* m,
+                               const ImgCECell* current,
+                               uint32_t G,
+                               const uint32_t* recent_counts_or_null,
+                               double penalty_alpha,
+                               const ImgDeltaUnit** out_units,
+                               double* out_scores_or_null,
+                               int* out_level);
+
 void            img_delta_memory_record_usage(ImgDeltaMemory* m,
                                               uint32_t delta_id,
                                               int success);
