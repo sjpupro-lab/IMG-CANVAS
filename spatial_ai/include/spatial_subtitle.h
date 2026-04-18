@@ -98,6 +98,14 @@ typedef struct SpatialCanvasPool_ {
     /* Scene change detector state per-pool (shared across canvases of
      * all types; threshold adapts to data statistics). */
     SceneChangeState scene;
+    /* freq_tag assignment thresholds for the RGBA clockwork engine.
+     *   g_threshold  = G-channel SAD (chapter transition signal)
+     *   rb_threshold = R+B combined SAD (context + structure break)
+     * A new chapter starts when either fires. Defaults come out of
+     * wiki5k tuning; override via --freq-tag-g-threshold /
+     * --freq-tag-rb-threshold. */
+    uint64_t clock_g_threshold;
+    uint64_t clock_rb_threshold;
 } SpatialCanvasPool;
 
 SpatialCanvasPool* pool_create(void);
@@ -107,6 +115,43 @@ void               pool_destroy(SpatialCanvasPool* p);
  * with an empty slot, or creates a new canvas. Also appends a subtitle
  * entry. Returns the new subtitle entry index, or -1 on failure. */
 int                pool_add_clause(SpatialCanvasPool* p, const char* text);
+
+/* Post-training canvas re-clustering. Equivalent of ai_recluster but
+ * at the P-frame level: groups same-DataType canvases whose
+ * CanvasBlockSummary A-channel cosine >= cluster_threshold, picks one
+ * anchor per cluster (preferring an existing IFRAME, tiebreak by
+ * active-cell count), and rewires the rest as PFRAMEs pointing at
+ * that anchor (frame_type = CANVAS_PFRAME, parent_canvas_id =
+ * anchor_canvas_id). The online scene_change_classify decisions made
+ * during streaming ingest are overridden by the global view. Pixel
+ * data is NOT modified — only I/P metadata. SubtitleTrack entries
+ * reference canvas_id unchanged, so retrieval stays valid.
+ *
+ * Block-sum cosine lives on a very different scale from clause-level
+ * A-cosine (values tend to cluster near 1.0 for structurally similar
+ * canvases), so the "right" threshold is corpus-dependent. Callers
+ * should prefer canvas_pool_auto_threshold below and only set a
+ * hardcoded value when reproducing a specific run. */
+void               canvas_pool_recluster(SpatialCanvasPool* p,
+                                         float cluster_threshold);
+
+/* Data-driven threshold for canvas_pool_recluster. Collects every
+ * same-DataType canvas pair's block-sum cosine, sorts descending, and
+ * returns the value at position target_merge_ratio × n_pairs. The
+ * result is "the threshold at which target_merge_ratio of similar-
+ * type pairs would pass", mirroring the clause-level
+ * calibrate_threshold in stream_train.
+ *
+ * target_merge_ratio: 0.0 (nothing merges) .. 1.0 (everything merges).
+ *   0.3 → conservative, ~30% of similar pairs merge (strict anchors).
+ *   0.5 → median, half of pairs merge.
+ *   0.8 → aggressive, 80% of pairs merge (few anchors remain).
+ *
+ * Returns -1.0f when the pool has too few same-type canvas pairs to
+ * produce a useful threshold; caller should then either skip
+ * reclustering or fall back to a sane default. */
+float              canvas_pool_auto_threshold(const SpatialCanvasPool* p,
+                                              float target_merge_ratio);
 
 /* Total populated slots across all canvases (== track.count) */
 uint32_t           pool_total_slots(const SpatialCanvasPool* p);
