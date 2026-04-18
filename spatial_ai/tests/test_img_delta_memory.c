@@ -680,6 +680,110 @@ static void test_ingest_resolve_skips_untouched(void) {
     PASS();
 }
 
+/* ── weight defaults + weighted add ─────────────────────── */
+
+static void test_weight_default_and_weighted_add(void) {
+    TEST("add uses IMG_DELTA_WEIGHT_DEFAULT; add_weighted records requested weight");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+
+    uint32_t id_default = img_delta_memory_add(m, 0, p);
+    assert(img_delta_memory_get(m, id_default)->weight ==
+           (uint16_t)IMG_DELTA_WEIGHT_DEFAULT);
+
+    uint32_t id_rare = img_delta_memory_add_weighted(m, 0, p, 4000);
+    assert(img_delta_memory_get(m, id_rare)->weight == 4000);
+
+    /* 0 → clamped to 1 so the score nudge stays finite. */
+    uint32_t id_zero = img_delta_memory_add_weighted(m, 0, p, 0);
+    assert(img_delta_memory_get(m, id_zero)->weight == 1);
+
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
+/* ── score nudge ordering by weight ─────────────────────── */
+
+static void test_weight_nudges_score(void) {
+    TEST("score: baseline + rare gives rare a bounded nudge ≥ 0.1");
+
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    ImgStateKey k = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
+                                       IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
+                                       0, IMG_DELTA_NONE);
+    uint32_t id_base = img_delta_memory_add(m, k, p);
+    uint32_t id_rare = img_delta_memory_add_weighted(m, k, p, 4000);
+
+    ImgCECell cur;
+    make_cell(&cur, IMG_ROLE_OBJECT, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
+
+    const ImgDeltaUnit* u_base = img_delta_memory_get(m, id_base);
+    const ImgDeltaUnit* u_rare = img_delta_memory_get(m, id_rare);
+    double s_base = img_delta_score(u_base, &cur, /*fallback=*/0);
+    double s_rare = img_delta_score(u_rare, &cur, /*fallback=*/0);
+
+    /* Rare outranks baseline at equal everything else. */
+    assert(s_rare > s_base);
+    /* Nudge magnitude: (4000-1000)/1000 × 0.10 = 0.30, capped at 0.30. */
+    assert(s_rare - s_base >= 0.29);
+    assert(s_rare - s_base <= 0.31);
+
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
+/* ── weight as tiebreak, not filter ─────────────────────── */
+
+static void test_weight_is_tiebreaker_not_filter(void) {
+    TEST("strong-evidence common delta still beats rare with bad match");
+
+    ImgDeltaPayload p = payload_simple(IMG_TIER_T1, 2, IMG_SIGN_POS,
+                                       IMG_MODE_INTENSITY);
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+
+    /* Veteran: role-matches cell, baseline weight, 50/100 success */
+    ImgStateKey k_match = img_state_key_make(IMG_ROLE_OBJECT, IMG_TONE_DARK,
+                                             IMG_FLOW_NONE, IMG_DEPTH_FOREGROUND,
+                                             0, IMG_DELTA_NONE);
+    uint32_t id_vet = img_delta_memory_add(m, k_match, p);
+    for (int i = 0; i < 100; i++) {
+        img_delta_memory_record_usage(m, id_vet, (i < 50) ? 1 : 0);
+    }
+
+    /* Rare but role-mismatched candidate — max weight. */
+    ImgStateKey k_miss = img_state_key_make(IMG_ROLE_SKY, IMG_TONE_BRIGHT,
+                                            IMG_FLOW_HORIZONTAL,
+                                            IMG_DEPTH_BACKGROUND,
+                                            5, IMG_DELTA_POSITIVE);
+    uint32_t id_rare = img_delta_memory_add_weighted(m, k_miss, p,
+                                                     (uint16_t)0xFFFFu);
+
+    ImgCECell cur;
+    make_cell(&cur, IMG_ROLE_OBJECT, IMG_TONE_DARK, IMG_FLOW_NONE,
+              IMG_DEPTH_FOREGROUND, 0, IMG_DELTA_NONE);
+
+    double s_vet  = img_delta_score(img_delta_memory_get(m, id_vet),
+                                    &cur, 0);
+    double s_rare = img_delta_score(img_delta_memory_get(m, id_rare),
+                                    &cur, 6);  /* wildcard fallback */
+
+    /* Veteran's role+direction+depth matches (~0.75 base) PLUS
+     * smoothed 51/102 success; rare gets max +0.30 nudge but pays
+     * -0.30 fallback penalty AND has 0 role/dir/depth match. Vet
+     * must still win — weight is a tiebreak, not a filter bypass. */
+    assert(s_vet > s_rare);
+
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_memory ===\n");
 
@@ -706,6 +810,11 @@ int main(void) {
     /* Auto feedback from resolve */
     test_ingest_resolve_outcomes();
     test_ingest_resolve_skips_untouched();
+
+    /* Weight (rarity boost / hierarchical sieve) */
+    test_weight_default_and_weighted_add();
+    test_weight_nudges_score();
+    test_weight_is_tiebreaker_not_filter();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

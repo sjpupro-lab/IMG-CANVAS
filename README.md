@@ -55,6 +55,8 @@ Render is a separate read-only layer that projects the CE grid onto raster. Engi
 - **Single source of truth for tiers** — `IMG_TIER_TABLE[]` holds `(scale_factor, range_max)` per tier.  `img_delta_compute` reads `scale_factor`; `img_render` reads `range_max`.  `img_tier_adapt` can quantile-rederive `range_max` per image for adaptive rendering.
 - **Set16 / Quad SIMD unit** (SPEC §6) — 4 × 4 = 16 cells, four 2 × 2 quads (PLUS / MINUS / SCALE / PRECISION).  SoA layout: every channel array is exactly 16 bytes — one 128-bit SSE2 / NEON register.
 - **Closed learning loop** — `img_delta_learn` reads before/after image pairs and inserts rules into memory.  `img_pipeline_run` applies the best match per cell; `img_ce_resolve` flags outliers; `img_delta_memory_ingest_resolve` credits every applied delta's outcome back into memory (`success_count` only; `usage_count` is already owned by `img_delta_apply`).  Laplace-smoothed success rate (`(s+1)/(u+2)`) keeps fresh 1/1 units from dominating seasoned 50/100 veterans.
+- **Weighted learning (hierarchical sieve)** — each stored delta carries a `weight` (baseline 1000).  At learn time, the first insert of a new semantic-role × tone × direction × depth bucket gets 4× baseline, the second gets 2×, the third and beyond settle at baseline.  Weight contributes a bounded `±0.30 / −0.10` nudge to `img_delta_score`, so rare patterns win close ties but never veto a strong-match common delta.  **Weight is a tiebreaker and learning-rate modulator, not a filter** — weak signals still survive.
+- **I-frame / P-frame CE codec** — `img_ce_diff_compute(base, target, diff)` produces a sparse per-cell patch (channel deltas + tag replacements).  `img_ce_diff_apply(base, diff, out)` reconstructs the target, optionally in place.  Same keyframe / delta doctrine the text engine already uses (`SPEC.md §D`, `README_KO §4`), now applied to CE grid state: stack-friendly persistence, compact transmission, and a natural unit for future memory serialisation.
 
 ---
 
@@ -71,12 +73,14 @@ spatial_ai/
 │   ├── img_set16.h                4×4 Set16 SoA + Quad indexing
 │   ├── img_render.h               CE grid → RGB, SlotShape, masks
 │   ├── img_pipeline.h             end-to-end run (image → result)
-│   └── img_delta_learn.h          populate memory from image pairs
+│   ├── img_delta_learn.h          populate memory from image pairs
+│   │                              (+ rarity-weighted hierarchical sieve)
+│   └── img_ce_diff.h              I-frame / P-frame CE state codec
 ├── src/
 │   ├── img_delta_tables_data.c    AUTO-GENERATED baked tables
 │   └── ... (one .c per header)
 ├── tests/
-│   └── test_img_*.c               53 unit tests covering every module
+│   └── test_img_*.c               63 unit tests covering every module
 ├── tools/
 │   ├── gen_delta_tables.c         offline table generator
 │   └── demo_pipeline.c            CLI for visual inspection
@@ -92,7 +96,7 @@ spatial_ai/
 ```bash
 cd spatial_ai
 make            # build all objects
-make test       # 14 test suites, 53 new img_* tests in CE stack
+make test       # 63 new img_* tests in the CE stack, plus text-engine suites
 ```
 
 Regenerate the baked delta tables (only needed after changing
@@ -149,12 +153,13 @@ Covers (in new CE stack):
 | Module | Tests |
 |---|---|
 | `img_ce` — SmallCanvas / CE grid / resolve | 6 |
-| `img_delta_memory` — StateKey pack, fallback chain, Laplace scoring, apply constraints, baked tables regression, auto-feedback | 15 |
+| `img_delta_memory` — StateKey pack, fallback chain, Laplace scoring, apply constraints, baked tables regression, auto-feedback, weight (default / weighted add / score nudge / tiebreak-not-filter) | 20 |
 | `img_set16` — layout/sizes, quad indices, CE ↔ Set16 roundtrip, edge clipping | 5 |
 | `img_render` — default options, empty grid, per-channel SlotShape, tier-4 bleed, PPM save, mask tints | 7 |
 | `img_pipeline` — defaults, seed-fraction bounds, memory-driven expansion, pipeline → render, masks flow, feedback ingest | 7 |
 | `img_tier_table` — canonical values, classify, adapt quantile, CE histogram, render-options adapt | 7 |
-| `img_delta_learn` — identical pairs, single-cell Δcore, tag precedence, noise floor, end-to-end | 5 |
+| `img_delta_learn` — identical pairs, single-cell Δcore, tag precedence, noise floor, end-to-end, rarity-weight decay across duplicates | 6 |
+| `img_ce_diff` — identical → empty, single-cell roundtrip, tag-only diff, many-cell roundtrip, self-apply, zero-init destroy | 6 |
 
 Pre-existing text-engine tests (`test_grid`, `test_match`, `test_keyframe`, …) remain green.
 
