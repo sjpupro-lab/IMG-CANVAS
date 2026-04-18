@@ -26,11 +26,12 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/img_render.c \
        $(SRC_DIR)/img_pipeline.c \
        $(SRC_DIR)/img_delta_learn.c \
-       $(SRC_DIR)/img_ce_diff.c
+       $(SRC_DIR)/img_ce_diff.c \
+       $(SRC_DIR)/spatial_bimodal.c
 
 OBJS = $(patsubst $(SRC_DIR)/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
-TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render test_img_pipeline test_img_tier_table test_img_delta_learn test_img_ce_diff
+TESTS = test_grid test_morpheme test_layers test_match test_keyframe test_context test_integration test_io test_cascade test_canvas test_adaptive test_subtitle test_img_ce test_img_delta_memory test_img_set16 test_img_render test_img_pipeline test_img_tier_table test_img_delta_learn test_img_ce_diff test_bimodal
 
 .PHONY: all clean test
 
@@ -111,6 +112,9 @@ $(BUILD_DIR)/test_img_delta_learn: $(TEST_DIR)/test_img_delta_learn.c $(OBJS) | 
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 $(BUILD_DIR)/test_img_ce_diff: $(TEST_DIR)/test_img_ce_diff.c $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+$(BUILD_DIR)/test_bimodal: $(TEST_DIR)/test_bimodal.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── CE delta tables: offline generator + baked data ─────────

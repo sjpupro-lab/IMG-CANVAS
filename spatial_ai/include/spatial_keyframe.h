@@ -4,12 +4,23 @@
 #include "spatial_grid.h"
 #include "spatial_match.h"
 
+/* Forward declaration — full definition in img_ce.h. Kept as an opaque
+ * pointer here so spatial_keyframe.h doesn't need to pull in the
+ * image CE engine. */
+typedef struct ImgCEGrid ImgCEGrid;
+
 /* Keyframe (I-Frame): full snapshot */
 typedef struct {
     uint32_t    id;
     char        label[64];
     SpatialGrid grid;  /* inline grid (channels point to allocated memory) */
     uint32_t    text_byte_count;
+
+    /* Bimodal pairing: optional CE image snapshot bound to this
+     * keyframe. NULL when no image was associated. Owned by the
+     * keyframe; destroyed automatically by spatial_ai_destroy.
+     * See spatial_bimodal.h for bind / get / release helpers. */
+    ImgCEGrid*  ce_snapshot;
 } Keyframe;
 
 /* Delta entry: sparse format (SPEC-ENGINE Phase D) */
