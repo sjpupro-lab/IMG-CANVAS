@@ -265,3 +265,9 @@ uint32_t ai_generate_next(SpatialAI* ai, const char* input_text,
     /* 4. Decode target frame's grid → text */
     return grid_decode_text(&ai->keyframes[target_id].grid, out, max_out);
 }
+
+/* Forwarding shim — see comment in spatial_generate.h. */
+uint32_t grid_decode_text_utf8(const SpatialGrid* g, char* out,
+                               uint32_t max_out) {
+    return grid_decode_text(g, out, max_out);
+}

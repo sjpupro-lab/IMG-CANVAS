@@ -95,6 +95,13 @@ double agg_score_byte(const AggTables* t, uint32_t y, uint8_t v,
  * Returns bytes written. */
 uint32_t grid_decode_text(const SpatialGrid* g, char* out, uint32_t max_out);
 
+/* UTF-8-aware variant used by the chat REPL. Currently a thin
+ * forwarding wrapper around grid_decode_text — v2's original
+ * UTF-8 boundary-respecting implementation wasn't shipped with
+ * the patch drop, so byte-level decode is the baseline. */
+uint32_t grid_decode_text_utf8(const SpatialGrid* g, char* out,
+                               uint32_t max_out);
+
 /* ── Full-clause generation ──────────────────────────────
  * SPEC §11.3:  "매칭된 키프레임의 다음 프레임이 곧 응답 텍스트의 패턴이다."
  *

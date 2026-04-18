@@ -1,5 +1,6 @@
 #include "spatial_subtitle.h"
 #include "spatial_match.h"
+#include "spatial_q8.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -252,6 +253,13 @@ SpatialCanvasPool* pool_create(void) {
     p->canvases = NULL;
     p->count = 0;
     p->capacity = 0;
+    /* Clock-engine thresholds; tuned on wiki5k to land avg 3-5 chapters
+     * per 32-slot canvas. G drives chapter transitions (hz_diff
+     * accumulation over a chapter). R+B catches context/structure
+     * breaks G alone misses. Raise both for stricter (fewer) chapters;
+     * lower for finer splits. */
+    p->clock_g_threshold  = 250u;
+    p->clock_rb_threshold = 150u;
     subtitle_track_init(&p->track);
     scene_change_init(&p->scene);
     return p;
@@ -320,6 +328,86 @@ int pool_add_clause(SpatialCanvasPool* p, const char* text) {
     /* If this placement filled the canvas, run scene-change classification
      * so future matching / compression can rely on I/P labels. */
     if (c->slot_count == CV_SLOTS && !c->classified) {
+        /* RGB diffusion has to run before freq_tag assignment: the
+         * tag heuristic looks at B-channel values across the slot
+         * edge, and B only exists at active cells (byte-value
+         * positions). Without diffusion the boundary band is mostly
+         * empty and every slot ends up tagged differently. Diffusing
+         * spreads B between active cells across the boundary so the
+         * mean-B metric is meaningful. Cost: ~2M cells × constant
+         * work, ~50 ms per canvas — paid once per fill. */
+        canvas_update_rgb(c);
+
+        /* Carve the 32 slots into chapter groups *before* classify so
+         * boundary_multiplier (which scene_change_classify will end up
+         * driving via canvas_compute_block_sums) sees the correct
+         * cross-chapter dampening.
+         *
+         * NB: the metric flipped in canvas_b_edge_value v2 from
+         * "B-channel mean at the literal pixel edge" to "A-channel
+         * cosine between the two slot regions". Threshold (set by
+         * trainer via pool->freq_tag_sad_threshold; default 30)
+         * means a chapter break is declared when adjacent slots' A
+         * patterns agree at less than that cosine — for wiki-style
+         * text the noise floor sits around 0.10, so 0.05 keeps most
+         * neighbours together while still cutting at sharp shifts.
+         *
+         * use_topic_hash=0: wiki-style clauses start with a different
+         * first token almost every line, so topic_hash flips on every
+         * slot transition. Re-enable once a coarser topic_hash
+         * (per-paragraph, not per-clause) exists. */
+        canvas_compute_all_summaries(c);
+
+        /* Diagnostic: dump the summary distribution for the first
+         * canvas to fill. Single static flag so we only print once
+         * per process. Kept for side-by-side comparison with the
+         * clock-engine output during tuning. */
+        static int diag_done = 0;
+        if (!diag_done) {
+            diag_done = 1;
+            printf("[diag] === first canvas summary ===\n");
+            printf("[diag] slot  b_mean  hz_hist(b3 b2 b1 b0)  byte_len  topic_hash\n");
+            for (uint32_t s = 0; s < c->slot_count; s++) {
+                const SlotComputeSummary* sm = &c->compute[s];
+                uint8_t h3 = (sm->hz_hist >> 12) & 0xF;
+                uint8_t h2 = (sm->hz_hist >> 8)  & 0xF;
+                uint8_t h1 = (sm->hz_hist >> 4)  & 0xF;
+                uint8_t h0 = (sm->hz_hist     )  & 0xF;
+                printf("[diag] %3u   %3u    %2u %2u %2u %2u            %5u    %u\n",
+                       s, sm->b_mean, h3, h2, h1, h0,
+                       c->meta[s].byte_length, c->meta[s].topic_hash);
+            }
+            printf("[diag] --- adjacent SAD (i-1 -> i, same row only) ---\n");
+            printf("[diag] pair    b_diff  hz_diff  total_sad\n");
+            for (uint32_t i = 1; i < c->slot_count; i++) {
+                uint32_t row_p = (i - 1) / CV_COLS;
+                uint32_t row_c = i       / CV_COLS;
+                if (row_p != row_c) {
+                    printf("[diag] %2u->%2u  (row crossing, skipped)\n", i - 1, i);
+                    continue;
+                }
+                const SlotComputeSummary* sa = &c->compute[i - 1];
+                const SlotComputeSummary* sb = &c->compute[i];
+                int b_diff = (sa->b_mean > sb->b_mean)
+                           ? sa->b_mean - sb->b_mean
+                           : sb->b_mean - sa->b_mean;
+                int hz_diff = 0;
+                for (uint32_t k = 0; k < 4; k++) {
+                    int va = (sa->hz_hist >> (k * 4)) & 0xF;
+                    int vb = (sb->hz_hist >> (k * 4)) & 0xF;
+                    hz_diff += (va > vb) ? va - vb : vb - va;
+                }
+                printf("[diag] %2u->%2u  %4d    %4d     %4d\n",
+                       i - 1, i, b_diff, hz_diff, b_diff + hz_diff);
+            }
+            printf("[diag] === end of first-canvas dump ===\n");
+        }
+
+        canvas_assign_freq_tags_clock(c,
+                                      p->clock_g_threshold,
+                                      p->clock_rb_threshold,
+                                      0);
+
         /* Gather same-type IFRAME canvases (excluding the candidate). */
         SpatialCanvas** refs = (SpatialCanvas**)malloc(p->count * sizeof(SpatialCanvas*));
         uint32_t n_refs = 0;
@@ -363,6 +451,223 @@ int pool_add_clause(SpatialCanvasPool* p, const char* text) {
 
 uint32_t pool_total_slots(const SpatialCanvasPool* p) {
     return p ? p->track.count : 0;
+}
+
+/* ── Canvas-level recluster ──────────────────────────────
+ *
+ * Equivalent of ai_recluster, one tier up. Rationale: streaming ingest
+ * calls scene_change_classify the moment a canvas fills up, so I/P
+ * decisions are made against whatever IFRAMEs happen to exist at that
+ * instant. A canvas that fills late in training might have been a
+ * perfect PFRAME child of a canvas filled early, but the classifier
+ * didn't have the information to spot it.
+ *
+ * Once ingest is done we have the full set. We recompute A-channel
+ * block-sum cosine between every same-type canvas pair, greedy-cluster
+ * them, and relabel: one anchor per cluster stays IFRAME, the rest
+ * become PFRAMEs pointing at that anchor. Pixels stay put; only the
+ * I/P graph changes.
+ *
+ * Cost: O(N_canvas^2 * 8192) on block-sum dot products. With ~150
+ * canvases per 5000-clause run that's ~184M fmul — sub-second.
+ */
+
+static int cmp_u16_desc(const void* a, const void* b) {
+    uint16_t fa = *(const uint16_t*)a, fb = *(const uint16_t*)b;
+    if (fa > fb) return -1;
+    if (fa < fb) return  1;
+    return 0;
+}
+
+/* Q8 cosine over CanvasBlockSummary (8192 uint32 sums per canvas).
+ * In practice block sums are tiny — wiki5k canvases see per-block A
+ * sums in the 0..50 range (active density × A value × 256 cells per
+ * block, with most blocks empty), so na, nb ≤ 8192 × 50² ≈ 20M and
+ * dot stays well under uint64. No pre-scale needed; an earlier
+ * version shifted by 8 to be "safe" but that flattened everything to
+ * 0 because the real magnitudes were already small. */
+static uint16_t block_sum_cosine_q16(const CanvasBlockSummary* a,
+                                     const CanvasBlockSummary* b) {
+    uint64_t dot = 0, na = 0, nb = 0;
+    for (uint32_t i = 0; i < CV_BLOCKS_TOTAL; i++) {
+        uint64_t ai = (uint64_t)a->sums[i];
+        uint64_t bi = (uint64_t)b->sums[i];
+        dot += ai * bi;
+        na  += ai * ai;
+        nb  += bi * bi;
+    }
+    return q16_cosine(dot, na, nb);
+}
+
+float canvas_pool_auto_threshold(const SpatialCanvasPool* pool,
+                                 float target_merge_ratio) {
+    if (!pool || pool->count < 2) return -1.0f;
+    if (target_merge_ratio < 0.0f) target_merge_ratio = 0.0f;
+    if (target_merge_ratio > 1.0f) target_merge_ratio = 1.0f;
+
+    const uint32_t n = pool->count;
+
+    CanvasBlockSummary* sums = (CanvasBlockSummary*)malloc(n * sizeof(CanvasBlockSummary));
+    if (!sums) return -1.0f;
+    for (uint32_t i = 0; i < n; i++) {
+        if (pool->canvases[i]) {
+            canvas_compute_block_sums(pool->canvases[i], &sums[i]);
+        } else {
+            memset(&sums[i], 0, sizeof(CanvasBlockSummary));
+        }
+    }
+
+    /* Upper bound on same-type pair count; allocate accordingly. */
+    uint64_t max_pairs = (uint64_t)n * (uint64_t)(n - 1) / 2ull;
+    if (max_pairs == 0) { free(sums); return -1.0f; }
+    uint16_t* pairs_q16 = (uint16_t*)malloc((size_t)max_pairs * sizeof(uint16_t));
+    if (!pairs_q16) { free(sums); return -1.0f; }
+
+    uint32_t np = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        SpatialCanvas* ci = pool->canvases[i];
+        if (!ci) continue;
+        for (uint32_t j = i + 1; j < n; j++) {
+            SpatialCanvas* cj = pool->canvases[j];
+            if (!cj) continue;
+            if (cj->canvas_type != ci->canvas_type) continue;
+            pairs_q16[np++] = block_sum_cosine_q16(&sums[i], &sums[j]);
+        }
+    }
+
+    float threshold = -1.0f;
+    if (np >= 4) {
+        qsort(pairs_q16, np, sizeof(uint16_t), cmp_u16_desc);
+        uint32_t idx = (uint32_t)(target_merge_ratio * (float)np);
+        if (idx >= np) idx = np - 1;
+        uint16_t pick_q16 = pairs_q16[idx];
+        threshold = q16_to_float(pick_q16);
+        printf("[canvas-calibrate] pairs=%u  target_merge=%.2f  "
+               "min=%.4f  p%02d=%.4f  median=%.4f  p10=%.4f  max=%.4f  (Q16 pick=%u)\n",
+               np, target_merge_ratio,
+               q16_to_float(pairs_q16[np - 1]),
+               (int)(target_merge_ratio * 100), threshold,
+               q16_to_float(pairs_q16[np / 2]), q16_to_float(pairs_q16[np / 10]),
+               q16_to_float(pairs_q16[0]),
+               (unsigned)pick_q16);
+    } else {
+        printf("[canvas-calibrate] only %u same-type pairs — "
+               "not enough to auto-tune a threshold\n", np);
+    }
+
+    free(pairs_q16);
+    free(sums);
+    return threshold;
+}
+
+void canvas_pool_recluster(SpatialCanvasPool* pool, float cluster_threshold) {
+    if (!pool || pool->count < 2) return;
+
+    const uint32_t n = pool->count;
+
+    CanvasBlockSummary* sums           = (CanvasBlockSummary*)malloc(n * sizeof(CanvasBlockSummary));
+    uint32_t*           active         = (uint32_t*)calloc(n, sizeof(uint32_t));
+    int32_t*            cluster_id     = (int32_t*) calloc(n, sizeof(int32_t));
+    uint32_t*           cluster_anchor = (uint32_t*)calloc(n, sizeof(uint32_t));
+    if (!sums || !active || !cluster_id || !cluster_anchor) {
+        free(sums); free(active); free(cluster_id); free(cluster_anchor);
+        return;
+    }
+
+    for (uint32_t i = 0; i < n; i++) {
+        cluster_id[i] = -1;
+        if (pool->canvases[i]) {
+            canvas_compute_block_sums(pool->canvases[i], &sums[i]);
+            active[i] = canvas_active_count(pool->canvases[i]);
+        }
+    }
+
+    /* Step 1: greedy type-filtered clustering on Q16 block-sum cosine.
+     * Convert the float threshold to Q16 once; per-pair work is then
+     * one isqrt + integer compare. */
+    uint16_t threshold_q16 = q16_from_float(cluster_threshold);
+    uint32_t num_clusters = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (cluster_id[i] >= 0) continue;
+        SpatialCanvas* ci = pool->canvases[i];
+        if (!ci) continue;
+
+        uint32_t c = num_clusters++;
+        cluster_id[i]     = (int32_t)c;
+        cluster_anchor[c] = i;
+
+        for (uint32_t j = i + 1; j < n; j++) {
+            if (cluster_id[j] >= 0) continue;
+            SpatialCanvas* cj = pool->canvases[j];
+            if (!cj) continue;
+            if (cj->canvas_type != ci->canvas_type) continue;
+
+            uint16_t sim_q16 = block_sum_cosine_q16(&sums[i], &sums[j]);
+            if (sim_q16 >= threshold_q16) cluster_id[j] = (int32_t)c;
+        }
+    }
+
+    /* Step 2: anchor selection.
+     *   Priority: pre-existing IFRAME > active cell count.
+     * Keeping an existing IFRAME as anchor avoids re-labelling its
+     * already-parent-linked children mid-flight. */
+    for (uint32_t c = 0; c < num_clusters; c++) {
+        uint32_t best_idx       = cluster_anchor[c];
+        SpatialCanvas* bc       = pool->canvases[best_idx];
+        int      best_was_iframe= bc && bc->classified &&
+                                  bc->frame_type == CANVAS_IFRAME;
+        uint32_t best_active    = active[best_idx];
+
+        for (uint32_t i = 0; i < n; i++) {
+            if (cluster_id[i] != (int32_t)c) continue;
+            SpatialCanvas* ci = pool->canvases[i];
+            if (!ci) continue;
+            int is_iframe = (ci->classified &&
+                             ci->frame_type == CANVAS_IFRAME);
+
+            int take = 0;
+            if (is_iframe && !best_was_iframe) take = 1;
+            else if (is_iframe == best_was_iframe &&
+                     active[i] > best_active)   take = 1;
+
+            if (take) {
+                best_idx        = i;
+                best_was_iframe = is_iframe;
+                best_active     = active[i];
+            }
+        }
+        cluster_anchor[c] = best_idx;
+    }
+
+    /* Step 3: relabel. Pixel data untouched. */
+    uint32_t iframes = 0, pframes = 0, flipped = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        if (cluster_id[i] < 0) continue;
+        SpatialCanvas* ci = pool->canvases[i];
+        if (!ci) continue;
+        uint32_t anchor = cluster_anchor[(uint32_t)cluster_id[i]];
+
+        CanvasFrameType old = ci->frame_type;
+        if (anchor == i) {
+            ci->frame_type        = CANVAS_IFRAME;
+            ci->parent_canvas_id  = UINT32_MAX;
+            iframes++;
+        } else {
+            ci->frame_type        = CANVAS_PFRAME;
+            ci->parent_canvas_id  = anchor;
+            pframes++;
+        }
+        ci->classified = 1;
+        if (old != ci->frame_type) flipped++;
+    }
+
+    printf("[canvas-recluster] canvases=%u  clusters=%u  I=%u  P=%u  flipped=%u\n",
+           n, num_clusters, iframes, pframes, flipped);
+
+    free(sums);
+    free(active);
+    free(cluster_id);
+    free(cluster_anchor);
 }
 
 /* ── 4-step pool_match ─────────────────────────────────── */

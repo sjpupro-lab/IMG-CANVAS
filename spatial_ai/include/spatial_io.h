@@ -44,17 +44,26 @@
  */
 
 #define SPAI_MAGIC    "SPAI"
-#define SPAI_VERSION  3u       /* v3 adds canvas pool + subtitle track */
+#define SPAI_VERSION  8u       /* v8 adds Keyframe.data_kind (uint8) between
+                                * seq_in_topic and the grid pixels, enabling the
+                                * DataType-aware recluster pre-filter. Legacy
+                                * v<=7 files load with data_kind=0 (DATA_PROSE).
+                                * v7 introduced SPAI_TAG_CANVAS_DELTA: P-frame
+                                * canvases store sparse A/R/G/B deltas vs parent
+                                * instead of full pixels. I-frames still use
+                                * SPAI_TAG_CANVAS. v6 files readable — delta tag
+                                * is optional. */
 
-#define SPAI_TAG_KEYFRAME    0x01
-#define SPAI_TAG_DELTA       0x02
-#define SPAI_TAG_WEIGHTS     0x03   /* ChannelWeight block: 4 × float */
-#define SPAI_TAG_CANVAS      0x04   /* One SpatialCanvas (v3) */
-#define SPAI_TAG_SUBTITLE    0x05   /* SubtitleTrack (v3) */
-#define SPAI_TAG_CE_SNAPSHOT 0x06   /* Image-side CE snapshot bound to a
-                                     * keyframe (bimodal pairing). Trailing
-                                     * record, forward-compatible: older
-                                     * readers stop at this tag cleanly. */
+#define SPAI_TAG_KEYFRAME     0x01
+#define SPAI_TAG_DELTA        0x02
+#define SPAI_TAG_WEIGHTS      0x03   /* ChannelWeight block: 4 × float */
+#define SPAI_TAG_CANVAS       0x04   /* One SpatialCanvas (v3) */
+#define SPAI_TAG_SUBTITLE     0x05   /* SubtitleTrack (v3) */
+#define SPAI_TAG_EMA          0x06   /* SpatialAI EMA tables (v4+): 4 × GRID_TOTAL × float */
+#define SPAI_TAG_CANVAS_DELTA 0x07   /* P-frame canvas (v7+): sparse A/R/G/B diff vs parent */
+#define SPAI_TAG_CE_SNAPSHOT  0x08   /* img-canvas bimodal: per-keyframe CE grid snapshot.
+                                      * Trailing record, forward-compatible — older readers
+                                      * stop cleanly on the unknown tag. */
 
 typedef enum {
     SPAI_OK = 0,

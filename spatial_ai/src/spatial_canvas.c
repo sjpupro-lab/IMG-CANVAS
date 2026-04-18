@@ -2,6 +2,7 @@
 #include "spatial_layers.h"
 #include "spatial_match.h"
 #include "spatial_morpheme.h"
+#include "spatial_q8.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -107,6 +108,7 @@ SpatialCanvas* canvas_create(void) {
     c->parent_canvas_id = UINT32_MAX;
     c->changed_ratio = 0.0f;
     c->classified = 0;
+    rgba_clock_init(&c->clock);
     return c;
 }
 
@@ -137,6 +139,7 @@ void canvas_clear(SpatialCanvas* c) {
     c->parent_canvas_id = UINT32_MAX;
     c->changed_ratio = 0.0f;
     c->classified = 0;
+    rgba_clock_init(&c->clock);
 }
 
 /* ── Slot → canvas-space coordinate helpers ────────────── */
@@ -205,7 +208,9 @@ int canvas_add_clause(SpatialCanvas* c, const char* text) {
 /* Return the boundary-diffusion multiplier for an update that flows
  *   from (sx, sy) into (dx, dy). Within the same slot the multiplier
  *   is 1.0; crossing a slot boundary uses the min of the two slots'
- *   boundary_weight. */
+ *   boundary_weight. If both slots have a non-zero freq_tag and the
+ *   tags disagree, the result is dampened by an extra 0.1× — chapters
+ *   inside a single canvas should diffuse weakly across each other. */
 static inline float boundary_multiplier(const SpatialCanvas* c,
                                         uint32_t sx, uint32_t sy,
                                         uint32_t dx, uint32_t dy) {
@@ -215,7 +220,405 @@ static inline float boundary_multiplier(const SpatialCanvas* c,
     if (s1 >= CV_SLOTS || s2 >= CV_SLOTS) return 1.0f;
     float w1 = c->meta[s1].boundary_weight;
     float w2 = c->meta[s2].boundary_weight;
-    return (w1 < w2) ? w1 : w2;
+    float base = (w1 < w2) ? w1 : w2;
+
+    uint16_t t1 = c->meta[s1].freq_tag;
+    uint16_t t2 = c->meta[s2].freq_tag;
+    if (t1 != 0 && t2 != 0 && t1 != t2) base *= 0.1f;
+
+    return base;
+}
+
+/* ── freq_tag helpers ────────────────────────────────────
+ *
+ * Chapter grouping within a single canvas. The streaming trainer
+ * places clauses into slots in arrival order regardless of any
+ * higher-level structure (paragraphs, sections); freq_tag carves
+ * those 32 slots into local "chapters" so RGB diffusion can stop at
+ * meaningful boundaries even when DataType (and therefore
+ * boundary_weight) is uniform across the canvas.
+ */
+
+/* Boundary signal between two slots.
+ *
+ * v1 sampled the B-channel at the literal pixel edge (right-most
+ * columns of left slot + left-most columns of right slot). It worked
+ * in theory but layers_encode_clause maps each byte to (byte_index,
+ * byte_value), and ASCII byte values cluster in [32, 126]. That puts
+ * active cells in *middle* columns and leaves the boundary band
+ * empty for English text, so the metric collapsed to 0 → every
+ * horizontal slot transition was tagged as "weak" → 29 chapters per
+ * canvas (one per slot, modulo row crossings).
+ *
+ * v2 uses the A-channel cosine similarity between the two slots'
+ * 256×256 regions. High cosine = same topic/structure = stay in
+ * chapter; low cosine = topic shift = chapter break. Robust across
+ * encodings (ASCII / UTF-8 / binary) because it doesn't depend on
+ * where in the column space the active cells happen to land.
+ *
+ * Caller semantics flip: now b_threshold is the *minimum similarity*
+ * required to stay in the same chapter, not a "below this is weak"
+ * value. Reasonable default range 0.10 .. 0.30 for wiki-style text. */
+float canvas_b_edge_value(const SpatialCanvas* c,
+                          uint32_t slot_a, uint32_t slot_b) {
+    if (!c || slot_a >= CV_SLOTS || slot_b >= CV_SLOTS) return -1.0f;
+
+    uint32_t row_a = slot_a / CV_COLS;
+    uint32_t col_a = slot_a % CV_COLS;
+    uint32_t row_b = slot_b / CV_COLS;
+    uint32_t col_b = slot_b % CV_COLS;
+
+    /* Same row + adjacent columns only — see header comment. */
+    if (row_a != row_b) return -1.0f;
+    int adj = ((col_a + 1 == col_b) || (col_b + 1 == col_a));
+    if (!adj) return -1.0f;
+
+    uint32_t a_x0 = col_a * CV_TILE, a_y0 = row_a * CV_TILE;
+    uint32_t b_x0 = col_b * CV_TILE, b_y0 = row_b * CV_TILE;
+
+    double dot = 0.0, na = 0.0, nb = 0.0;
+    for (uint32_t dy = 0; dy < CV_TILE; dy++) {
+        for (uint32_t dx = 0; dx < CV_TILE; dx++) {
+            uint32_t ai = (a_y0 + dy) * CV_WIDTH + (a_x0 + dx);
+            uint32_t bi = (b_y0 + dy) * CV_WIDTH + (b_x0 + dx);
+            double va = (double)c->A[ai];
+            double vb = (double)c->A[bi];
+            dot += va * vb;
+            na  += va * va;
+            nb  += vb * vb;
+        }
+    }
+    if (na == 0.0 || nb == 0.0) return 0.0f;
+    return (float)(dot / (sqrt(na) * sqrt(nb)));
+}
+
+uint32_t canvas_b_edge_sad(const SpatialCanvas* c,
+                           uint32_t slot_a, uint32_t slot_b) {
+    if (!c || slot_a >= CV_SLOTS || slot_b >= CV_SLOTS) return UINT32_MAX;
+
+    uint32_t row_a = slot_a / CV_COLS;
+    uint32_t col_a = slot_a % CV_COLS;
+    uint32_t row_b = slot_b / CV_COLS;
+    uint32_t col_b = slot_b % CV_COLS;
+    if (row_a != row_b) return UINT32_MAX;
+    int adj = ((col_a + 1 == col_b) || (col_b + 1 == col_a));
+    if (!adj) return UINT32_MAX;
+
+    uint32_t a_x0 = col_a * CV_TILE, a_y0 = row_a * CV_TILE;
+    uint32_t b_x0 = col_b * CV_TILE, b_y0 = row_b * CV_TILE;
+
+    uint32_t sad = 0;
+    for (uint32_t dy = 0; dy < CV_TILE; dy++) {
+        for (uint32_t dx = 0; dx < CV_TILE; dx++) {
+            uint32_t ai = (a_y0 + dy) * CV_WIDTH + (a_x0 + dx);
+            uint32_t bi = (b_y0 + dy) * CV_WIDTH + (b_x0 + dx);
+            uint16_t va = c->A[ai];
+            uint16_t vb = c->A[bi];
+            sad += (va > vb) ? (uint32_t)(va - vb) : (uint32_t)(vb - va);
+        }
+    }
+    return sad;
+}
+
+uint16_t canvas_b_edge_q16(const SpatialCanvas* c,
+                           uint32_t slot_a, uint32_t slot_b) {
+    if (!c || slot_a >= CV_SLOTS || slot_b >= CV_SLOTS) return 0;
+
+    uint32_t row_a = slot_a / CV_COLS;
+    uint32_t col_a = slot_a % CV_COLS;
+    uint32_t row_b = slot_b / CV_COLS;
+    uint32_t col_b = slot_b % CV_COLS;
+    if (row_a != row_b) return 0;
+    int adj = ((col_a + 1 == col_b) || (col_b + 1 == col_a));
+    if (!adj) return 0;
+
+    uint32_t a_x0 = col_a * CV_TILE, a_y0 = row_a * CV_TILE;
+    uint32_t b_x0 = col_b * CV_TILE, b_y0 = row_b * CV_TILE;
+
+    uint64_t dot = 0, na = 0, nb = 0;
+    for (uint32_t dy = 0; dy < CV_TILE; dy++) {
+        for (uint32_t dx = 0; dx < CV_TILE; dx++) {
+            uint32_t ai = (a_y0 + dy) * CV_WIDTH + (a_x0 + dx);
+            uint32_t bi = (b_y0 + dy) * CV_WIDTH + (b_x0 + dx);
+            uint64_t va = (uint64_t)c->A[ai];
+            uint64_t vb = (uint64_t)c->A[bi];
+            dot += va * vb;
+            na  += va * va;
+            nb  += vb * vb;
+        }
+    }
+    return q16_cosine(dot, na, nb);
+}
+
+uint16_t canvas_get_freq_tag(const SpatialCanvas* c,
+                             uint32_t x, uint32_t y) {
+    if (!c) return 0;
+    if (x >= CV_WIDTH || y >= CV_HEIGHT) return 0;
+    uint32_t slot = (y / CV_TILE) * CV_COLS + (x / CV_TILE);
+    if (slot >= CV_SLOTS) return 0;
+    return c->meta[slot].freq_tag;
+}
+
+/* ── Compute-canvas summaries ─────────────────────────────
+ *
+ * 3-byte (b_mean, hz_hist) summary per slot. b_mean = average B over
+ * active cells (context strength); hz_hist = 4-bin column histogram
+ * of A activity, 4 bits per bin (vocabulary / byte-spectrum
+ * fingerprint). canvas_assign_freq_tags compares two slots'
+ * summaries via L1 SAD instead of cosine on the raw 256×256.
+ */
+
+/* ── Full-channel delta (I/P-frame canvas storage) ────────── */
+
+uint32_t canvas_full_delta(const SpatialCanvas* parent,
+                           const SpatialCanvas* child,
+                           CanvasFullDelta* out) {
+    if (!parent || !child || !out) return 0;
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < CV_TOTAL; i++) {
+        int16_t dA = (int16_t)((int)child->A[i] - (int)parent->A[i]);
+        int8_t  dR = (int8_t) ((int)child->R[i] - (int)parent->R[i]);
+        int8_t  dG = (int8_t) ((int)child->G[i] - (int)parent->G[i]);
+        int8_t  dB = (int8_t) ((int)child->B[i] - (int)parent->B[i]);
+        if (dA != 0 || dR != 0 || dG != 0 || dB != 0) {
+            out[n].index  = i;
+            out[n].diff_A = dA;
+            out[n].diff_R = dR;
+            out[n].diff_G = dG;
+            out[n].diff_B = dB;
+            n++;
+        }
+    }
+    return n;
+}
+
+void canvas_apply_full_delta(const SpatialCanvas* parent,
+                             const CanvasFullDelta* entries,
+                             uint32_t count,
+                             SpatialCanvas* target) {
+    if (!parent || !target) return;
+    /* Start from parent pixels as the reconstruction base. */
+    memcpy(target->A, parent->A, CV_TOTAL * sizeof(uint16_t));
+    memcpy(target->R, parent->R, CV_TOTAL);
+    memcpy(target->G, parent->G, CV_TOTAL);
+    memcpy(target->B, parent->B, CV_TOTAL);
+
+    if (!entries) return;
+    for (uint32_t k = 0; k < count; k++) {
+        uint32_t i = entries[k].index;
+        if (i >= CV_TOTAL) continue;
+        int a = (int)target->A[i] + entries[k].diff_A;
+        int r = (int)target->R[i] + entries[k].diff_R;
+        int g = (int)target->G[i] + entries[k].diff_G;
+        int b = (int)target->B[i] + entries[k].diff_B;
+        if (a < 0) a = 0; else if (a > 65535) a = 65535;
+        if (r < 0) r = 0; else if (r > 255)   r = 255;
+        if (g < 0) g = 0; else if (g > 255)   g = 255;
+        if (b < 0) b = 0; else if (b > 255)   b = 255;
+        target->A[i] = (uint16_t)a;
+        target->R[i] = (uint8_t)r;
+        target->G[i] = (uint8_t)g;
+        target->B[i] = (uint8_t)b;
+    }
+}
+
+#define HZ_BINS         4
+#define HZ_BIN_COLS     (CV_TILE / HZ_BINS)   /* = 64 */
+#define HZ_BIN_MAX      15u                   /* 4 bits per bin */
+
+void canvas_compute_slot_summary(SpatialCanvas* c, uint32_t slot) {
+    if (!c || slot >= CV_SLOTS) return;
+    uint32_t x0, y0;
+    canvas_slot_byte_offset(slot, &x0, &y0);
+
+    uint32_t bins[HZ_BINS] = {0};
+    uint64_t b_sum = 0;
+    uint32_t active = 0;
+
+    for (uint32_t dy = 0; dy < CV_TILE; dy++) {
+        for (uint32_t dx = 0; dx < CV_TILE; dx++) {
+            uint32_t i = (y0 + dy) * CV_WIDTH + (x0 + dx);
+            if (c->A[i] == 0) continue;
+            active++;
+            b_sum += c->B[i];
+            uint32_t bin = dx / HZ_BIN_COLS;
+            if (bin < HZ_BINS) bins[bin]++;
+        }
+    }
+
+    SlotComputeSummary* s = &c->compute[slot];
+    s->b_mean  = active ? (uint8_t)(b_sum / active) : 0;
+
+    if (active == 0) { s->hz_hist = 0; return; }
+
+    /* Normalize each bin to 0..15 and pack 4 bits per nibble. */
+    uint16_t hist = 0;
+    for (uint32_t k = 0; k < HZ_BINS; k++) {
+        uint32_t n = (bins[k] * HZ_BIN_MAX) / active;
+        if (n > HZ_BIN_MAX) n = HZ_BIN_MAX;
+        hist |= (uint16_t)(n << (k * 4));
+    }
+    s->hz_hist = hist;
+}
+
+void canvas_compute_all_summaries(SpatialCanvas* c) {
+    if (!c) return;
+    for (uint32_t s = 0; s < c->slot_count; s++) {
+        canvas_compute_slot_summary(c, s);
+    }
+}
+
+uint16_t canvas_summary_sad(const SpatialCanvas* c,
+                            uint32_t slot_a, uint32_t slot_b) {
+    if (!c || slot_a >= CV_SLOTS || slot_b >= CV_SLOTS) return UINT16_MAX;
+    const SlotComputeSummary* sa = &c->compute[slot_a];
+    const SlotComputeSummary* sb = &c->compute[slot_b];
+
+    uint16_t b_diff = (sa->b_mean > sb->b_mean)
+                    ? (uint16_t)(sa->b_mean - sb->b_mean)
+                    : (uint16_t)(sb->b_mean - sa->b_mean);
+
+    uint16_t hz_diff = 0;
+    for (uint32_t k = 0; k < HZ_BINS; k++) {
+        uint8_t va = (uint8_t)((sa->hz_hist >> (k * 4)) & 0xF);
+        uint8_t vb = (uint8_t)((sb->hz_hist >> (k * 4)) & 0xF);
+        hz_diff += (va > vb) ? (uint16_t)(va - vb) : (uint16_t)(vb - va);
+    }
+    return (uint16_t)(b_diff + hz_diff);
+}
+
+/* Clockwork-engine chapter assignment.
+ *
+ * Per-slot transition: compute the four input signals and tick the
+ * canvas's engine. SAD is measured against a snapshot taken at the
+ * start of the current chapter — the "accumulated delta since the
+ * chapter began". G_sad (chapter-group signal) is the primary
+ * break trigger; R+B combined handles context + structure breaks
+ * that don't manifest as a pure G shift.
+ *
+ * Inputs per slot:
+ *   R_in = b_diff (b_mean[i] vs b_mean[i-1], clamped to u8)
+ *   G_in = hz_diff (nibble-SAD of hz_hist[i] vs hz_hist[i-1], 0..60)
+ *   B_in = hz_hist sum of slot i (0..60)
+ *   A_in = min(active_cells × 256, 65535) — uint16
+ */
+void canvas_assign_freq_tags_clock(SpatialCanvas* c,
+                                   uint64_t g_threshold,
+                                   uint64_t rb_threshold,
+                                   int      use_topic_hash) {
+    if (!c || c->slot_count == 0) return;
+
+    rgba_clock_init(&c->clock);
+    RGBAClockEngine chapter_start;
+    rgba_clock_copy(&chapter_start, &c->clock);
+
+    uint16_t current_tag = 1;
+    c->meta[0].freq_tag = current_tag;
+    if (c->slot_count == 1) return;
+
+    for (uint32_t i = 1; i < c->slot_count; i++) {
+        const SlotMeta* prev = &c->meta[i - 1];
+        SlotMeta*       cur  = &c->meta[i];
+
+        int topic_changed = (use_topic_hash &&
+                             prev->topic_hash != cur->topic_hash);
+
+        /* Skip SAD check across physical row boundaries (8×4 layout). */
+        uint32_t row_prev = (i - 1) / CV_COLS;
+        uint32_t row_cur  = i       / CV_COLS;
+        int same_row = (row_prev == row_cur);
+
+        /* ── build tick inputs from compute summaries ── */
+        const SlotComputeSummary* sa = &c->compute[i - 1];
+        const SlotComputeSummary* sb = &c->compute[i];
+
+        uint32_t b_diff = (sa->b_mean > sb->b_mean)
+                        ? (uint32_t)(sa->b_mean - sb->b_mean)
+                        : (uint32_t)(sb->b_mean - sa->b_mean);
+        if (b_diff > 255u) b_diff = 255u;
+
+        uint32_t hz_diff = 0;
+        for (uint32_t k = 0; k < 4; k++) {
+            uint32_t va = (sa->hz_hist >> (k * 4)) & 0xF;
+            uint32_t vb = (sb->hz_hist >> (k * 4)) & 0xF;
+            hz_diff += (va > vb) ? (va - vb) : (vb - va);
+        }
+        if (hz_diff > 255u) hz_diff = 255u;
+
+        uint32_t hz_sum = 0;
+        for (uint32_t k = 0; k < 4; k++) {
+            hz_sum += (sb->hz_hist >> (k * 4)) & 0xF;
+        }
+        if (hz_sum > 255u) hz_sum = 255u;
+
+        /* Active-cell count of slot i, scaled × 256 into uint16 space. */
+        uint32_t x0, y0;
+        canvas_slot_byte_offset(i, &x0, &y0);
+        uint32_t active = 0;
+        for (uint32_t dy = 0; dy < CV_TILE; dy++) {
+            for (uint32_t dx = 0; dx < CV_TILE; dx++) {
+                if (c->A[(y0 + dy) * CV_WIDTH + (x0 + dx)] > 0) active++;
+            }
+        }
+        uint32_t a_scaled = active * 256u;
+        if (a_scaled > 65535u) a_scaled = 65535u;
+
+        rgba_clock_tick(&c->clock,
+                        (uint8_t)b_diff,
+                        (uint8_t)hz_diff,
+                        (uint8_t)hz_sum,
+                        (uint16_t)a_scaled);
+
+        int clock_break = 0;
+        if (same_row) {
+            RGBAClockSad sad = rgba_clock_sad(&chapter_start, &c->clock);
+            if (sad.G_sad > g_threshold) {
+                clock_break = 1;
+            } else if (sad.R_sad + sad.B_sad > rb_threshold) {
+                clock_break = 1;
+            }
+        }
+
+        if (clock_break || topic_changed) {
+            current_tag++;
+            rgba_clock_copy(&chapter_start, &c->clock);
+        }
+        cur->freq_tag = current_tag;
+    }
+}
+
+void canvas_assign_freq_tags(SpatialCanvas* c,
+                             uint16_t sad_threshold,
+                             int      use_topic_hash) {
+    if (!c || c->slot_count == 0) return;
+
+    uint16_t current_tag = 1;
+    c->meta[0].freq_tag = current_tag;
+    if (c->slot_count == 1) return;
+
+    /* Compare adjacent slots via the compute-canvas summary.
+     *   sad < threshold  → similar enough, stay in current chapter
+     *   sad ≥ threshold  → different enough, start a new chapter
+     * Row crossings (vertical placement neighbours) are skipped from
+     * the SAD check; topic_changed alone may still split there. */
+    for (uint32_t i = 1; i < c->slot_count; i++) {
+        const SlotMeta* prev = &c->meta[i - 1];
+        SlotMeta*       cur  = &c->meta[i];
+
+        int topic_changed = (use_topic_hash &&
+                             prev->topic_hash != cur->topic_hash);
+
+        uint32_t row_prev = (i - 1) / CV_COLS;
+        uint32_t row_cur  = i       / CV_COLS;
+        int      sad_high = 0;
+        if (row_prev == row_cur) {
+            uint16_t sad = canvas_summary_sad(c, i - 1, i);
+            sad_high = (sad >= sad_threshold);
+        }
+
+        if (sad_high || topic_changed) current_tag++;
+        cur->freq_tag = current_tag;
+    }
 }
 
 void canvas_update_rgb(SpatialCanvas* c) {

@@ -197,7 +197,7 @@ uint32_t match_engine(SpatialAI* ai, SpatialGrid* input,
         uint32_t cand_ids[1024];
         uint32_t cand_count = 0;
         uint32_t h = grid_hash(input);
-        bucket_candidates(bidx, h, 5, cand_ids, &cand_count);
+        bucket_candidates(bidx, h, 5, cand_ids, &cand_count, 1024);
 
         if (cand_count < TOP_K) {
             /* Fallback: full scan */
