@@ -23,3 +23,7 @@ spatial_ai/data/squad*.json
 
 # Saved model files (produced by ai_save / --save)
 *.spai
+*.imem
+
+# User-local training data (licensing varies — keep out of the repo)
+spatial_ai/data/training/

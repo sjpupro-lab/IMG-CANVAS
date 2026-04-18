@@ -223,3 +223,101 @@ uint32_t img_delta_memory_learn_from_images(ImgDeltaMemory* memory,
     if (ace) img_ce_grid_destroy(ace);
     return added;
 }
+
+/* ── Multi-scale learn (box-blur cascade) ────────────────── */
+
+/* Separable box blur with running-window. In-place is NOT supported —
+ * `dst` must be distinct from `src`. For radius r the kernel size is
+ * (2r+1). `scratch` is a caller-provided temp buffer of the same size
+ * as src/dst, used to hold the horizontal-pass result before the
+ * vertical pass writes into dst. All three buffers must be
+ * w*h*3 bytes. Radius 0 just memcpy's src to dst. */
+static void box_blur_rgb(const uint8_t* src,
+                         uint32_t w, uint32_t h, uint32_t r,
+                         uint8_t* scratch, uint8_t* dst) {
+    const size_t n = (size_t)w * h * 3u;
+    if (r == 0) { memcpy(dst, src, n); return; }
+
+    /* Horizontal pass: src → scratch. */
+    for (uint32_t y = 0; y < h; y++) {
+        const uint8_t* row_src = src     + (size_t)y * w * 3u;
+        uint8_t*       row_dst = scratch + (size_t)y * w * 3u;
+        for (int c = 0; c < 3; c++) {
+            uint32_t sum = 0;
+            /* Prime the window using mirrored borders at x < 0. */
+            for (int x = -(int)r; x <= (int)r; x++) {
+                int xi = x < 0 ? 0 : (x >= (int)w ? (int)w - 1 : x);
+                sum += row_src[xi * 3 + c];
+            }
+            const uint32_t win = 2u * r + 1u;
+            for (uint32_t x = 0; x < w; x++) {
+                row_dst[x * 3 + c] = (uint8_t)(sum / win);
+                /* slide window: drop (x - r), add (x + r + 1) */
+                int drop = (int)x - (int)r;
+                int add  = (int)x + (int)r + 1;
+                int drop_i = drop < 0 ? 0 : (drop >= (int)w ? (int)w - 1 : drop);
+                int add_i  = add  < 0 ? 0 : (add  >= (int)w ? (int)w - 1 : add);
+                sum -= row_src[drop_i * 3 + c];
+                sum += row_src[add_i  * 3 + c];
+            }
+        }
+    }
+
+    /* Vertical pass: scratch → dst. */
+    for (uint32_t x = 0; x < w; x++) {
+        for (int c = 0; c < 3; c++) {
+            uint32_t sum = 0;
+            for (int y = -(int)r; y <= (int)r; y++) {
+                int yi = y < 0 ? 0 : (y >= (int)h ? (int)h - 1 : y);
+                sum += scratch[(size_t)yi * w * 3u + x * 3 + c];
+            }
+            const uint32_t win = 2u * r + 1u;
+            for (uint32_t y = 0; y < h; y++) {
+                dst[(size_t)y * w * 3u + x * 3 + c] = (uint8_t)(sum / win);
+                int drop = (int)y - (int)r;
+                int add  = (int)y + (int)r + 1;
+                int drop_i = drop < 0 ? 0 : (drop >= (int)h ? (int)h - 1 : drop);
+                int add_i  = add  < 0 ? 0 : (add  >= (int)h ? (int)h - 1 : add);
+                sum -= scratch[(size_t)drop_i * w * 3u + x * 3 + c];
+                sum += scratch[(size_t)add_i  * w * 3u + x * 3 + c];
+            }
+        }
+    }
+}
+
+uint32_t img_delta_memory_learn_multiscale(ImgDeltaMemory* memory,
+                                           const uint8_t* image_rgb,
+                                           uint32_t w, uint32_t h,
+                                           const uint32_t* blur_radii,
+                                           uint32_t n_radii) {
+    if (!memory || !image_rgb || !blur_radii) return 0;
+    if (w == 0 || h == 0 || n_radii < 2) return 0;
+
+    const size_t bytes = (size_t)w * h * 3u;
+    uint8_t* scratch  = (uint8_t*)malloc(bytes);
+    uint8_t* coarser  = (uint8_t*)malloc(bytes);
+    uint8_t* finer    = (uint8_t*)malloc(bytes);
+    if (!scratch || !coarser || !finer) {
+        free(scratch); free(coarser); free(finer);
+        return 0;
+    }
+
+    uint32_t total_added = 0;
+
+    /* Pair iteration: (radii[0], radii[1]) → (radii[1], radii[2]) → ...
+     * radii are expected coarsest-first. No validation of order; the
+     * caller controls semantics. */
+    for (uint32_t i = 0; i + 1 < n_radii; i++) {
+        box_blur_rgb(image_rgb, w, h, blur_radii[i],     scratch, coarser);
+        box_blur_rgb(image_rgb, w, h, blur_radii[i + 1], scratch, finer);
+        total_added += img_delta_memory_learn_from_images(
+            memory,
+            coarser, w, h,
+            finer,   w, h);
+    }
+
+    free(scratch);
+    free(coarser);
+    free(finer);
+    return total_added;
+}

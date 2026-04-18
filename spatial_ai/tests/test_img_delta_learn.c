@@ -332,6 +332,76 @@ static void test_rarity_weight_decreases_across_duplicates(void) {
     PASS();
 }
 
+/* ── Multi-scale learn: cascade produces deltas + tier diversity ── */
+
+static void test_learn_multiscale_cascade(void) {
+    TEST("learn_multiscale on a blurred cascade produces tier-diverse deltas");
+
+    /* Synthesise a 128×128 gradient-like image so the blur has
+     * meaningful differences at each level. */
+    const uint32_t w = 128, h = 128;
+    uint8_t* img = (uint8_t*)malloc((size_t)w * h * 3);
+    assert(img);
+    for (uint32_t y = 0; y < h; y++) {
+        for (uint32_t x = 0; x < w; x++) {
+            size_t p = ((size_t)y * w + x) * 3u;
+            img[p + 0] = (uint8_t)(x * 2);        /* R ramp */
+            img[p + 1] = (uint8_t)(y * 2);        /* G ramp */
+            img[p + 2] = (uint8_t)((x ^ y) & 0xFF); /* B xor noise */
+        }
+    }
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    assert(mem);
+
+    /* Coarsest → finest: radius 8, 2, 0 */
+    uint32_t radii[] = { 8, 2, 0 };
+    uint32_t added = img_delta_memory_learn_multiscale(
+        mem, img, w, h, radii, 3);
+    assert(added > 0);
+    assert(img_delta_memory_count(mem) == added);
+
+    /* Check that deltas span multiple tiers — the cascade should
+     * naturally place coarser (big blur step) deltas at T3 and
+     * finer steps at T1. */
+    uint32_t tier_hist[IMG_TIER_MAX] = {0};
+    for (uint32_t i = 0; i < img_delta_memory_count(mem); i++) {
+        const ImgDeltaUnit* u = img_delta_memory_get(mem, i);
+        uint8_t t = img_delta_state_tier(u->payload.state);
+        if (t < IMG_TIER_MAX) tier_hist[t]++;
+    }
+    uint32_t nonempty_tiers = 0;
+    for (int t = 0; t < IMG_TIER_MAX; t++) {
+        if (tier_hist[t] > 0) nonempty_tiers++;
+    }
+    /* With a 3-level cascade (2 pairs) and a noisy image we expect
+     * activity across at least 2 tier classes. */
+    assert(nonempty_tiers >= 2);
+
+    free(img);
+    img_delta_memory_destroy(mem);
+    PASS();
+}
+
+static void test_learn_multiscale_guards(void) {
+    TEST("learn_multiscale NULL / n<2 / zero-size → 0 + no side effect");
+
+    ImgDeltaMemory* mem = img_delta_memory_create();
+    uint8_t pixel[3] = {0, 0, 0};
+    uint32_t radii[] = { 4, 0 };
+
+    assert(img_delta_memory_learn_multiscale(NULL,  pixel, 1, 1, radii, 2) == 0);
+    assert(img_delta_memory_learn_multiscale(mem,   NULL,  1, 1, radii, 2) == 0);
+    assert(img_delta_memory_learn_multiscale(mem,   pixel, 0, 1, radii, 2) == 0);
+    assert(img_delta_memory_learn_multiscale(mem,   pixel, 1, 0, radii, 2) == 0);
+    assert(img_delta_memory_learn_multiscale(mem,   pixel, 1, 1, radii, 1) == 0);
+    assert(img_delta_memory_learn_multiscale(mem,   pixel, 1, 1, NULL,  2) == 0);
+
+    assert(img_delta_memory_count(mem) == 0);
+    img_delta_memory_destroy(mem);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_learn ===\n");
 
@@ -341,6 +411,8 @@ int main(void) {
     test_numeric_noise_floor();
     test_learn_drives_pipeline_expansions();
     test_rarity_weight_decreases_across_duplicates();
+    test_learn_multiscale_cascade();
+    test_learn_multiscale_guards();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;
