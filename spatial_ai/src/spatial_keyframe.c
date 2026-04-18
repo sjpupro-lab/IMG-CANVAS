@@ -1,6 +1,7 @@
 #include "spatial_keyframe.h"
 #include "spatial_layers.h"
 #include "spatial_subtitle.h"   /* SpatialCanvasPool for ai_get_canvas_pool */
+#include "img_ce.h"             /* ImgCEGrid lifecycle for ce_snapshot */
 #include <string.h>
 #include <stdio.h>
 
@@ -48,6 +49,12 @@ void spatial_ai_destroy(SpatialAI* ai) {
             if (g->R) { free(g->R); g->R = NULL; }
             if (g->G) { free(g->G); g->G = NULL; }
             if (g->B) { free(g->B); g->B = NULL; }
+
+            /* Bimodal pairing: free the optional CE image snapshot. */
+            if (ai->keyframes[i].ce_snapshot) {
+                img_ce_grid_destroy(ai->keyframes[i].ce_snapshot);
+                ai->keyframes[i].ce_snapshot = NULL;
+            }
         }
         free(ai->keyframes);
     }

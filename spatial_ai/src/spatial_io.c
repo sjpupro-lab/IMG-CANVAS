@@ -2,6 +2,7 @@
 #include "spatial_grid.h"
 #include "spatial_canvas.h"
 #include "spatial_subtitle.h"
+#include "img_ce.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -181,6 +182,72 @@ static SpaiStatus read_weights_body(FILE* fp, ChannelWeight* w) {
     return SPAI_OK;
 }
 
+/* ── CE snapshot record: tag 0x06 ──
+ * Layout (all little-endian native):
+ *   uint32 kf_id           owning keyframe
+ *   uint32 width           = IMG_CE_SIZE (sanity)
+ *   uint32 height          = IMG_CE_SIZE (sanity)
+ *   cell_bytes[9 * IMG_CE_TOTAL]
+ *      per-cell packed tuple:
+ *        core, link, delta, priority,
+ *        tone_class, semantic_role, direction_class,
+ *        depth_class, delta_sign
+ *      last_delta_id is NOT serialized — it's a runtime resume
+ *      pointer and is reset to IMG_DELTA_ID_NONE on load.
+ */
+static SpaiStatus write_ce_snapshot_record(FILE* fp,
+                                           uint32_t kf_id,
+                                           const ImgCEGrid* ce) {
+    uint8_t tag = SPAI_TAG_CE_SNAPSHOT;
+    if (fwrite(&tag, 1, 1, fp) != 1) return SPAI_ERR_WRITE;
+
+    uint32_t w = ce->width;
+    uint32_t h = ce->height;
+    if (fwrite(&kf_id, 4, 1, fp) != 1) return SPAI_ERR_WRITE;
+    if (fwrite(&w,     4, 1, fp) != 1) return SPAI_ERR_WRITE;
+    if (fwrite(&h,     4, 1, fp) != 1) return SPAI_ERR_WRITE;
+
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        const ImgCECell* c = &ce->cells[i];
+        uint8_t buf[9] = {
+            c->core, c->link, c->delta, c->priority,
+            c->tone_class, c->semantic_role,
+            c->direction_class, c->depth_class, c->delta_sign
+        };
+        if (fwrite(buf, 1, 9, fp) != 9) return SPAI_ERR_WRITE;
+    }
+    return SPAI_OK;
+}
+
+static SpaiStatus read_ce_snapshot_body(FILE* fp,
+                                        uint32_t* out_kf_id,
+                                        ImgCEGrid* out_ce) {
+    uint32_t kf_id, w, h;
+    if (fread(&kf_id, 4, 1, fp) != 1) return SPAI_ERR_READ;
+    if (fread(&w,     4, 1, fp) != 1) return SPAI_ERR_READ;
+    if (fread(&h,     4, 1, fp) != 1) return SPAI_ERR_READ;
+    if (w != IMG_CE_SIZE || h != IMG_CE_SIZE) return SPAI_ERR_CORRUPT;
+
+    for (uint32_t i = 0; i < IMG_CE_TOTAL; i++) {
+        uint8_t buf[9];
+        if (fread(buf, 1, 9, fp) != 9) return SPAI_ERR_READ;
+        ImgCECell* c = &out_ce->cells[i];
+        c->core            = buf[0];
+        c->link            = buf[1];
+        c->delta           = buf[2];
+        c->priority        = buf[3];
+        c->tone_class      = buf[4];
+        c->semantic_role   = buf[5];
+        c->direction_class = buf[6];
+        c->depth_class     = buf[7];
+        c->delta_sign      = buf[8];
+        c->last_delta_id   = IMG_DELTA_ID_NONE;
+    }
+
+    if (out_kf_id) *out_kf_id = kf_id;
+    return SPAI_OK;
+}
+
 /* ── Canvas record: tag 0x04 ──
  * Layout (all little-endian native):
  *   uint32 slot_count
@@ -339,6 +406,15 @@ SpaiStatus ai_save(const SpatialAI* ai, const char* path) {
         if (s != SPAI_OK) { fclose(fp); return s; }
     }
 
+    /* Bimodal: image-side CE snapshots bound to keyframes. Trailing
+     * records — older readers stop at unknown tag cleanly. */
+    for (uint32_t i = 0; i < ai->kf_count; i++) {
+        const Keyframe* kf = &ai->keyframes[i];
+        if (!kf->ce_snapshot) continue;
+        s = write_ce_snapshot_record(fp, kf->id, kf->ce_snapshot);
+        if (s != SPAI_OK) { fclose(fp); return s; }
+    }
+
     if (fclose(fp) != 0) return SPAI_ERR_WRITE;
     return SPAI_OK;
 }
@@ -477,6 +553,33 @@ SpatialAI* ai_load(const char* path, SpaiStatus* out_status) {
                 fclose(fp); spatial_ai_destroy(ai);
                 if (out_status) *out_status = s;
                 return NULL;
+            }
+        } else if (tag == SPAI_TAG_CE_SNAPSHOT) {
+            ImgCEGrid* ce = img_ce_grid_create();
+            if (!ce) {
+                fclose(fp); spatial_ai_destroy(ai);
+                if (out_status) *out_status = SPAI_ERR_ALLOC;
+                return NULL;
+            }
+            uint32_t kf_id = 0;
+            s = read_ce_snapshot_body(fp, &kf_id, ce);
+            if (s != SPAI_OK) {
+                img_ce_grid_destroy(ce);
+                fclose(fp); spatial_ai_destroy(ai);
+                if (out_status) *out_status = s;
+                return NULL;
+            }
+            /* Bind to the owning keyframe if still in range. If the
+             * record references an id that was trimmed out, drop the
+             * grid silently — the file is consistent but the KF isn't
+             * here anymore. */
+            if (kf_id < ai->kf_count) {
+                if (ai->keyframes[kf_id].ce_snapshot) {
+                    img_ce_grid_destroy(ai->keyframes[kf_id].ce_snapshot);
+                }
+                ai->keyframes[kf_id].ce_snapshot = ce;
+            } else {
+                img_ce_grid_destroy(ce);
             }
         } else {
             /* Unknown trailing tag — stop cleanly, forward compatible. */

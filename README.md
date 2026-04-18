@@ -57,6 +57,7 @@ Render is a separate read-only layer that projects the CE grid onto raster. Engi
 - **Closed learning loop** — `img_delta_learn` reads before/after image pairs and inserts rules into memory.  `img_pipeline_run` applies the best match per cell; `img_ce_resolve` flags outliers; `img_delta_memory_ingest_resolve` credits every applied delta's outcome back into memory (`success_count` only; `usage_count` is already owned by `img_delta_apply`).  Laplace-smoothed success rate (`(s+1)/(u+2)`) keeps fresh 1/1 units from dominating seasoned 50/100 veterans.
 - **Weighted learning (hierarchical sieve)** — each stored delta carries a `weight` (baseline 1000).  At learn time, the first insert of a new semantic-role × tone × direction × depth bucket gets 4× baseline, the second gets 2×, the third and beyond settle at baseline.  Weight contributes a bounded `±0.30 / −0.10` nudge to `img_delta_score`, so rare patterns win close ties but never veto a strong-match common delta.  **Weight is a tiebreaker and learning-rate modulator, not a filter** — weak signals still survive.
 - **I-frame / P-frame CE codec** — `img_ce_diff_compute(base, target, diff)` produces a sparse per-cell patch (channel deltas + tag replacements).  `img_ce_diff_apply(base, diff, out)` reconstructs the target, optionally in place.  Same keyframe / delta doctrine the text engine already uses (`SPEC.md §D`, `README_KO §4`), now applied to CE grid state: stack-friendly persistence, compact transmission, and a natural unit for future memory serialisation.
+- **Bimodal pairing (text ↔ image at Keyframe level)** — each `Keyframe` can optionally bind an `ImgCEGrid` snapshot.  `ai_bind_image_to_kf` runs the image pipeline and attaches the resulting CE grid; `ai_get_ce_snapshot` retrieves it; save/load persists it via a trailing `SPAI_TAG_CE_SNAPSHOT` record (forward-compatible — older readers stop cleanly on the unknown tag).  Two engines, one binding layer: text-side match and CE match each return their own 0..1 score and the caller combines them — no mixed StateKey space needed.
 
 ---
 
@@ -75,12 +76,13 @@ spatial_ai/
 │   ├── img_pipeline.h             end-to-end run (image → result)
 │   ├── img_delta_learn.h          populate memory from image pairs
 │   │                              (+ rarity-weighted hierarchical sieve)
-│   └── img_ce_diff.h              I-frame / P-frame CE state codec
+│   ├── img_ce_diff.h              I-frame / P-frame CE state codec
+│   └── spatial_bimodal.h          text ↔ image pairing at Keyframe level
 ├── src/
 │   ├── img_delta_tables_data.c    AUTO-GENERATED baked tables
 │   └── ... (one .c per header)
 ├── tests/
-│   └── test_img_*.c               63 unit tests covering every module
+│   └── test_img_*.c               67 unit tests covering every module
 ├── tools/
 │   ├── gen_delta_tables.c         offline table generator
 │   └── demo_pipeline.c            CLI for visual inspection
@@ -96,7 +98,7 @@ spatial_ai/
 ```bash
 cd spatial_ai
 make            # build all objects
-make test       # 63 new img_* tests in the CE stack, plus text-engine suites
+make test       # 67 new img_* tests in the CE stack, plus text-engine suites
 ```
 
 Regenerate the baked delta tables (only needed after changing
@@ -160,6 +162,7 @@ Covers (in new CE stack):
 | `img_tier_table` — canonical values, classify, adapt quantile, CE histogram, render-options adapt | 7 |
 | `img_delta_learn` — identical pairs, single-cell Δcore, tag precedence, noise floor, end-to-end, rarity-weight decay across duplicates | 6 |
 | `img_ce_diff` — identical → empty, single-cell roundtrip, tag-only diff, many-cell roundtrip, self-apply, zero-init destroy | 6 |
+| `spatial_bimodal` — unbound returns NULL, bind_image attaches CE snapshot, release clears binding, save/load roundtrip | 4 |
 
 Pre-existing text-engine tests (`test_grid`, `test_match`, `test_keyframe`, …) remain green.
 

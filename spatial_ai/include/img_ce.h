@@ -153,7 +153,7 @@ typedef struct {
 
 #define IMG_DELTA_ID_NONE 0xFFFFFFFFu
 
-typedef struct {
+typedef struct ImgCEGrid {
     ImgCECell* cells;   /* IMG_CE_TOTAL cells, row-major */
     uint32_t   width;   /* IMG_CE_SIZE */
     uint32_t   height;  /* IMG_CE_SIZE */
