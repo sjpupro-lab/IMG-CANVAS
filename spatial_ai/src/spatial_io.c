@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ── Header struct (on-disk, 32 bytes) ── */
 typedef struct {
@@ -50,6 +51,13 @@ static SpaiStatus write_header(FILE* fp, uint32_t kf_count, uint32_t df_count) {
     h.version  = SPAI_VERSION;
     h.kf_count = kf_count;
     h.df_count = df_count;
+    /* reserved[0] = save unix timestamp (uint32 seconds).
+     *   Overflows in 2106 — acceptable for a training-session marker.
+     *   Older readers that only parsed magic/version/counts ignored
+     *   reserved[*] and keep working.
+     * reserved[1..2] remain zeroed for future use. */
+    time_t now = time(NULL);
+    h.reserved[0] = (uint32_t)((now > 0) ? (uint64_t)now : 0u);
     if (fwrite(&h, sizeof(h), 1, fp) != 1) return SPAI_ERR_WRITE;
     return SPAI_OK;
 }
@@ -966,6 +974,15 @@ SpaiStatus ai_peek_header(const char* path,
                           uint32_t* out_kf_count,
                           uint32_t* out_df_count,
                           uint32_t* out_version) {
+    return ai_peek_header_ex(path, out_kf_count, out_df_count,
+                             out_version, NULL);
+}
+
+SpaiStatus ai_peek_header_ex(const char* path,
+                             uint32_t* out_kf_count,
+                             uint32_t* out_df_count,
+                             uint32_t* out_version,
+                             uint32_t* out_save_timestamp) {
     if (!path) return SPAI_ERR_OPEN;
     FILE* fp = fopen(path, "rb");
     if (!fp) return SPAI_ERR_OPEN;
@@ -975,8 +992,9 @@ SpaiStatus ai_peek_header(const char* path,
     fclose(fp);
     if (s != SPAI_OK) return s;
 
-    if (out_kf_count) *out_kf_count = h.kf_count;
-    if (out_df_count) *out_df_count = h.df_count;
-    if (out_version)  *out_version  = h.version;
+    if (out_kf_count)        *out_kf_count        = h.kf_count;
+    if (out_df_count)        *out_df_count        = h.df_count;
+    if (out_version)         *out_version         = h.version;
+    if (out_save_timestamp)  *out_save_timestamp  = h.reserved[0];
     return SPAI_OK;
 }

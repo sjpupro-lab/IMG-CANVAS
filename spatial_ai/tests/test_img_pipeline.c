@@ -298,6 +298,39 @@ static void test_pipeline_feedback_ingests_outcomes(void) {
     PASS();
 }
 
+/* ── dimension guards ────────────────────────────────────── */
+
+static void test_pipeline_rejects_degenerate_dims(void) {
+    TEST("pipeline rejects dims outside [16..16384] per side");
+
+    /* A 1×1 image: fails min-dim guard. */
+    uint8_t tiny[3] = {128, 128, 128};
+    ImgPipelineResult r = {0};
+    /* fprintf to stderr is expected; we only assert the return. */
+    fprintf(stderr, "  (expected [img_pipeline] reject log below)\n");
+    assert(img_pipeline_run(tiny, 1, 1, NULL, NULL, &r) == 0);
+    assert(r.small_canvas == NULL);
+    assert(r.ce_grid      == NULL);
+    img_pipeline_result_destroy(&r);
+
+    /* 8×32 — one side below MIN_DIM. */
+    uint8_t* thin = (uint8_t*)calloc(8 * 32 * 3, 1);
+    assert(thin);
+    fprintf(stderr, "  (expected [img_pipeline] reject log below)\n");
+    ImgPipelineResult r2 = {0};
+    assert(img_pipeline_run(thin, 8, 32, NULL, NULL, &r2) == 0);
+    free(thin);
+
+    /* 20000×10: max-dim trip. (We don't need to allocate a real buffer
+     * this size — the guard fires before we touch pixels.) */
+    uint8_t stub[1];
+    ImgPipelineResult r3 = {0};
+    fprintf(stderr, "  (expected [img_pipeline] reject log below)\n");
+    assert(img_pipeline_run(stub, 20000, 10, NULL, NULL, &r3) == 0);
+
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_pipeline ===\n");
 
@@ -308,6 +341,7 @@ int main(void) {
     test_destroy_zero_init_safe();
     test_pipeline_masks_flow_to_render();
     test_pipeline_feedback_ingests_outcomes();
+    test_pipeline_rejects_degenerate_dims();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;

@@ -54,6 +54,7 @@ typedef struct {
     const char* event_log;       /* --log <path>; NULL = disabled */
     uint32_t    max_clauses;
     uint32_t    checkpoint;
+    uint32_t    max_line_bytes;  /* long-line auto-split soft cap; 0 = disabled */
     int         verbose;
     int         verify;
     float       threshold;       /* <0 means "leave engine default" */
@@ -77,6 +78,10 @@ static void usage(const char* prog) {
         "  --max <N>             max clauses to ingest (default %d)\n"
         "  --save <path>         final model path (default build/models/stream_auto.spai)\n"
         "  --checkpoint <N>      save every N clauses (default %d, 0 disables)\n"
+        "  --max-line-bytes <N>  auto-split lines longer than N bytes at the\n"
+        "                        nearest sentence boundary ('.', '!', '?') or\n"
+        "                        whitespace; 0 disables, default 256 (matches\n"
+        "                        the grid Y axis so encoding doesn't wrap)\n"
         "  --log <path>          emit a binary training-event log consumed by\n"
         "                        tools/animate_training.py (clause-level cell\n"
         "                        events for the twinkling-grid visualization)\n"
@@ -127,6 +132,7 @@ static int parse_args(int argc, char** argv, StreamArgs* a) {
     a->event_log         = NULL;
     a->max_clauses       = DEFAULT_MAX;
     a->checkpoint        = DEFAULT_CKPT;
+    a->max_line_bytes    = GRID_SIZE;  /* 256 — matches the grid Y axis */
     a->verbose           = 0;
     a->verify            = 0;
     a->threshold         = -1.0f;
@@ -154,6 +160,11 @@ static int parse_args(int argc, char** argv, StreamArgs* a) {
             long v = strtol(argv[++i], NULL, 10);
             if (v < 0) v = 0;
             a->checkpoint = (uint32_t)v;
+        } else if (strcmp(k, "--max-line-bytes") == 0 && i + 1 < argc) {
+            long v = strtol(argv[++i], NULL, 10);
+            if (v < 0) v = 0;                 /* 0 = disable splitting */
+            if (v > 65535) v = 65535;
+            a->max_line_bytes = (uint32_t)v;
         } else if (strcmp(k, "--log") == 0 && i + 1 < argc) {
             a->event_log = argv[++i];
         } else if (strcmp(k, "--threshold") == 0 && i + 1 < argc) {
@@ -545,6 +556,51 @@ static float calibrate_threshold(const char* input_path,
     return threshold;
 }
 
+/* ── Long-line split (--max-line-bytes) ───────────────────
+ *
+ * Stream input can carry clauses longer than the 256-byte Y-axis of
+ * the encoding grid. `grid_encode` wraps via y = i % 256 silently,
+ * which means the tail of a 400-byte line overwrites its head.
+ *
+ * split_line_into_clauses picks a cut position in [0, limit] that
+ * ends on the latest sentence boundary ('.', '!', '?') or failing
+ * that the latest whitespace. Runs iteratively: the producer stores
+ * each piece separately. Empty or whitespace-only tails are dropped.
+ *
+ * The emitted pointer is a non-owning reference into `buf`. Callers
+ * mutate `buf` by replacing one byte with '\0' at the cut point for
+ * the duration of the per-clause store, then restore it.
+ *
+ * Returns the number of bytes consumed (clause + the delimiter byte
+ * we landed on). The remainder starts at `buf + consumed` and is
+ * ready for the next iteration. Returns the full length when `len`
+ * already fits within `limit` (single-clause fast path).
+ */
+static uint32_t pick_cut(const char* buf, uint32_t len, uint32_t limit) {
+    if (limit == 0 || len <= limit) return len;
+
+    /* Look backwards from `limit` for the latest sentence terminator. */
+    for (uint32_t i = limit; i > 0; i--) {
+        char c = buf[i - 1];
+        if (c == '.' || c == '!' || c == '?') return i;
+    }
+    /* Fall back to the latest whitespace. */
+    for (uint32_t i = limit; i > 0; i--) {
+        char c = buf[i - 1];
+        if (c == ' ' || c == '\t') return i;
+    }
+    /* No punctuation, no whitespace — hard cut at the limit. */
+    return limit;
+}
+
+/* Trim leading ASCII whitespace in-place by shifting. */
+static void left_trim(char* s) {
+    if (!s) return;
+    uint32_t skip = 0;
+    while (s[skip] == ' ' || s[skip] == '\t') skip++;
+    if (skip) memmove(s, s + skip, strlen(s + skip) + 1);
+}
+
 /* ── main ────────────────────────────────────────────────── */
 
 int main(int argc, char** argv) {
@@ -615,38 +671,74 @@ int main(int argc, char** argv) {
     uint32_t skipped = 0;
     double   t0 = now_sec();
 
+    uint32_t split_events = 0;   /* # of input lines we cut up */
+    uint32_t pieces_total  = 0;  /* # of post-split clauses actually stored */
     while (count < args.max_clauses && fgets(line, sizeof(line), fp)) {
         strip_trailing(line);
         if (is_skippable(line)) { skipped++; continue; }
         uint32_t line_len = (uint32_t)strlen(line);
         if (line_len < MIN_CLAUSE_LEN) { skipped++; continue; }
 
-        /* Full training step: layers_encode_clause → update_rgb_directional
-         * → cosine vs existing KFs → delta (≥threshold) or new KF (<threshold).
-         * All of that lives inside ai_store_auto. */
-        uint32_t rid = ai_store_auto(ai, line, NULL);
+        /* Long-line auto-split:
+         *   --max-line-bytes defaults to 256 (grid Y axis). Lines
+         *   beyond that are cut at the latest sentence boundary
+         *   (falling back to whitespace / hard cut). Each piece is
+         *   stored as its own clause so grid_encode never wraps. */
+        const int split_enabled = (args.max_line_bytes > 0) &&
+                                  (line_len > args.max_line_bytes);
+        if (split_enabled) split_events++;
 
-        /* ── Canvas layer (2048×1024, 32 clauses per canvas) ─────
-         *
-         * pool_add_clause auto-detects the clause's DataType
-         * (PROSE/DIALOG/CODE/SHORT), routes it to a canvas of the
-         * same type, and when a canvas fills (slot_count == 32) runs
-         * scene_change_classify() to mark the canvas as IFRAME or
-         * PFRAME (delta vs the closest same-type IFRAME). Persisted
-         * automatically by ai_save because ai->canvas_pool is set. */
-        pool_add_clause(ai_get_canvas_pool(ai), line);
+        uint32_t offset = 0;
+        while (count < args.max_clauses) {
+            uint32_t remaining = line_len - offset;
+            if (remaining == 0) break;
 
-        count++;
+            uint32_t chunk = (args.max_line_bytes > 0 &&
+                              remaining > args.max_line_bytes)
+                           ? pick_cut(line + offset, remaining,
+                                      args.max_line_bytes)
+                           : remaining;
+            if (chunk == 0) break;   /* safety — shouldn't happen */
 
-        if (log) {
-            event_log_write(log, count - 1, decode_decision(rid), line, line_len);
+            char saved = line[offset + chunk];
+            line[offset + chunk] = '\0';
+
+            char* piece = line + offset;
+            left_trim(piece);
+            uint32_t piece_len = (uint32_t)strlen(piece);
+
+            if (piece_len >= MIN_CLAUSE_LEN && !is_skippable(piece)) {
+                /* Full training step: layers_encode_clause → update_rgb_directional
+                 * → cosine vs existing KFs → delta (≥threshold) or new KF (<threshold).
+                 * All of that lives inside ai_store_auto. */
+                uint32_t rid = ai_store_auto(ai, piece, NULL);
+
+                /* ── Canvas layer (2048×1024, 32 clauses per canvas) ───── */
+                pool_add_clause(ai_get_canvas_pool(ai), piece);
+
+                count++;
+                pieces_total++;
+
+                if (log) {
+                    event_log_write(log, count - 1, decode_decision(rid),
+                                    piece, piece_len);
+                }
+
+                if (args.verbose) {
+                    printf("[stream] %u: kf=%u df=%u  %.40s%s%s\n",
+                           count, ai->kf_count, ai->df_count, piece,
+                           strlen(piece) > 40 ? "..." : "",
+                           split_enabled ? "  [split]" : "");
+                }
+            } else {
+                skipped++;
+            }
+
+            line[offset + chunk] = saved;
+            offset += chunk;
         }
 
-        if (args.verbose) {
-            printf("[stream] %u: kf=%u df=%u  %.40s%s\n",
-                   count, ai->kf_count, ai->df_count, line,
-                   strlen(line) > 40 ? "..." : "");
-        } else if (count % 5000 == 0) {
+        if (!args.verbose && count % 5000 == 0 && count > 0) {
             double dt = now_sec() - t0;
             printf("[stream] %u clauses, KF=%u, Delta=%u, elapsed=%.1fs (%.0f c/s)\n",
                    count, ai->kf_count, ai->df_count, dt,
@@ -682,6 +774,10 @@ int main(int argc, char** argv) {
     double elapsed = now_sec() - t0;
     printf("[stream] ingest done: clauses=%u skipped=%u KF=%u Delta=%u elapsed=%.2fs\n",
            count, skipped, ai->kf_count, ai->df_count, elapsed);
+    if (split_events > 0) {
+        printf("[stream] split: %u long lines → %u pieces (cap=%u bytes)\n",
+               split_events, pieces_total, args.max_line_bytes);
+    }
 
     /* ── Canvas layer summary ──
      *
