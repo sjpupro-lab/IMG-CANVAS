@@ -321,6 +321,8 @@ uint32_t img_delta_memory_add_with_hint(ImgDeltaMemory* m,
     u->has_post_hint = (post_hint != 0) ? 1 : 0;
     u->usage_count   = 0;
     u->success_count = 0;
+    u->weight        = (uint16_t)IMG_DELTA_WEIGHT_DEFAULT;
+    u->_pad          = 0;
     return id;
 }
 
@@ -328,6 +330,18 @@ uint32_t img_delta_memory_add(ImgDeltaMemory* m,
                               ImgStateKey pre_key,
                               ImgDeltaPayload payload) {
     return img_delta_memory_add_with_hint(m, pre_key, payload, 0);
+}
+
+uint32_t img_delta_memory_add_weighted(ImgDeltaMemory* m,
+                                       ImgStateKey pre_key,
+                                       ImgDeltaPayload payload,
+                                       uint16_t weight) {
+    uint32_t id = img_delta_memory_add_with_hint(m, pre_key, payload, 0);
+    if (id == IMG_DELTA_ID_NONE) return id;
+    /* A weight of 0 would zero out the weight nudge AND divide-by-zero
+     * anyone computing a normalised factor — clamp up to 1. */
+    m->units[id].weight = weight ? weight : 1u;
+    return id;
 }
 
 const ImgDeltaUnit* img_delta_memory_get(const ImgDeltaMemory* m,
@@ -371,6 +385,18 @@ double img_delta_score(const ImgDeltaUnit* unit,
     if (img_state_key_depth_class    (unit->pre_key) == current->depth_class)     s += 0.20;
     s += 0.25 * img_delta_unit_success_rate(unit);
     if (fallback_level > 0) s -= 0.05 * (double)fallback_level;
+
+    /* Weight nudge: rare deltas (weight above baseline) get a small
+     * push; baseline weight contributes 0; below-baseline (which
+     * learning never produces, only manual inserts) is capped so it
+     * can't dominate — weak signals still survive. */
+    const double delta_w = ((double)unit->weight - (double)IMG_DELTA_WEIGHT_DEFAULT)
+                         / (double)IMG_DELTA_WEIGHT_DEFAULT;
+    double nudge = 0.10 * delta_w;
+    if (nudge >  0.30) nudge =  0.30;
+    if (nudge < -0.10) nudge = -0.10;
+    s += nudge;
+
     return s;
 }
 

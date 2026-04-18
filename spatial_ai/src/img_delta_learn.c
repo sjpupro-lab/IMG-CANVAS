@@ -99,6 +99,58 @@ static int derive_payload(const ImgCECell* pre,
     return 1;
 }
 
+/* ── rarity weighting (hierarchical sieve) ───────────────── */
+
+/* Mask that keys what counts as "same bucket" for rarity. Uses the
+ * L2 fallback mask layout: role + tone + direction + depth, dropping
+ * link_bucket and delta_sign. Two inserts with the same role/tone/
+ * direction/depth are treated as observing the same pattern regardless
+ * of link bucketing, so rarity reflects the semantic pattern, not
+ * every surface-level permutation. */
+#define LEARN_BUCKET_MASK                                       \
+    (((uint64_t)0xFFu << 40) |   /* semantic_role   */          \
+     ((uint64_t)0xFFu << 32) |   /* tone_class      */          \
+     ((uint64_t)0xFFu << 24) |   /* direction_class */          \
+     ((uint64_t)0xFFu << 16))    /* depth_class     */
+
+/* Rarity boost cap — a brand-new pattern (count=0) inserts at
+ * BOOST_MAX × baseline. Ceiling at 4× to stay far below uint16 max
+ * so there is always headroom for future multiplicative refinements. */
+#define LEARN_BOOST_MAX  4u
+
+/* Count how many existing units share the target's L2 bucket. */
+static uint32_t count_same_bucket(const ImgDeltaMemory* memory,
+                                  ImgStateKey pre_key) {
+    const uint32_t n = img_delta_memory_count(memory);
+    const ImgStateKey target = pre_key & LEARN_BUCKET_MASK;
+    uint32_t same = 0;
+    for (uint32_t i = 0; i < n; i++) {
+        const ImgDeltaUnit* u = img_delta_memory_get(memory, i);
+        if (!u) continue;
+        if ((u->pre_key & LEARN_BUCKET_MASK) == target) same++;
+    }
+    return same;
+}
+
+/* weight = baseline × max(1, BOOST_MAX / (same + 1))
+ *   same=0 → boost = 4           → weight = 4000
+ *   same=1 → boost = 2           → weight = 2000
+ *   same=3 → boost = 1 (clamped) → weight = 1000
+ *   large  → still baseline, never below.
+ *
+ * Never dips under baseline (no filtering), only amplifies rare
+ * patterns so their cumulative feedback learns faster than common
+ * patterns' noise. */
+static uint16_t rarity_weight_for(const ImgDeltaMemory* memory,
+                                  ImgStateKey pre_key) {
+    const uint32_t same = count_same_bucket(memory, pre_key);
+    uint32_t boost = LEARN_BOOST_MAX / (same + 1);
+    if (boost < 1) boost = 1;
+    uint32_t w = IMG_DELTA_WEIGHT_DEFAULT * boost;
+    if (w > 0xFFFFu) w = 0xFFFFu;
+    return (uint16_t)w;
+}
+
 /* ── public API ─────────────────────────────────────────── */
 
 uint32_t img_delta_memory_learn_from_pair(ImgDeltaMemory* memory,
@@ -122,12 +174,23 @@ uint32_t img_delta_memory_learn_from_pair(ImgDeltaMemory* memory,
         const ImgStateKey pre_key  = img_state_key_from_cell(pre);
         const ImgStateKey post_key = img_state_key_from_cell(post);
 
-        /* Insert a new rule. No dedup in v0 — repeated observations
-         * let usage_count / success_count accumulate naturally over
-         * time, which scoring and Laplace smoothing consume. */
-        (void)img_delta_memory_add_with_hint(memory, pre_key, payload,
-                                             post_key);
-        added++;
+        /* Hierarchical sieve: a pattern that hasn't been seen in this
+         * memory's L2 bucket gets a weight boost so resolve-time
+         * feedback bites harder. Common patterns stay at baseline —
+         * weak signals aren't filtered, just not amplified. */
+        const uint16_t w = rarity_weight_for(memory, pre_key);
+
+        uint32_t id = img_delta_memory_add_with_hint(memory, pre_key,
+                                                     payload, post_key);
+        if (id != IMG_DELTA_ID_NONE) {
+            /* add_with_hint set baseline weight; rewrite to the rarity
+             * weight. Cast away const — this is the only sanctioned
+             * post-insert field tweak in the learn path. */
+            ImgDeltaUnit* mut =
+                (ImgDeltaUnit*)img_delta_memory_get(memory, id);
+            if (mut) mut->weight = w ? w : 1u;
+            added++;
+        }
     }
     return added;
 }

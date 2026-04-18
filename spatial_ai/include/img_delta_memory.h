@@ -186,6 +186,13 @@ uint32_t img_delta_tables_entry_count(void);
 
 /* ── DeltaUnit / DeltaMemory ─────────────────────────────── */
 
+/* Baseline weight for a "normal" delta (see ImgDeltaUnit.weight).
+ * Callers that want a neutral insert pass IMG_DELTA_WEIGHT_DEFAULT.
+ * Learning can boost weight above this value to amplify rare
+ * deltas, but never filters below baseline — the point is that weak
+ * signals still survive, just with less selection pressure. */
+#define IMG_DELTA_WEIGHT_DEFAULT  1000u
+
 typedef struct {
     uint32_t        id;
     ImgStateKey     pre_key;
@@ -195,6 +202,13 @@ typedef struct {
 
     uint32_t usage_count;
     uint32_t success_count;
+
+    /* Rarity / learning-rate modulator. 1000 = baseline; higher =
+     * rare at insert time (gets a selection nudge via img_delta_score
+     * and wins tiebreaks); lower is possible but not recommended —
+     * we don't filter, we just push rare evidence up. */
+    uint16_t weight;
+    uint16_t _pad;                 /* alignment */
 } ImgDeltaUnit;
 
 double img_delta_unit_success_rate(const ImgDeltaUnit* unit);
@@ -214,6 +228,15 @@ uint32_t        img_delta_memory_add_with_hint(ImgDeltaMemory* m,
                                                ImgStateKey pre_key,
                                                ImgDeltaPayload payload,
                                                ImgStateKey post_hint);
+
+/* Like img_delta_memory_add but sets the unit's weight explicitly.
+ * Useful when the caller has a rarity / confidence estimate from
+ * the learning signal. A weight of 0 clamps up to 1 to keep the
+ * scoring contribution finite. */
+uint32_t        img_delta_memory_add_weighted(ImgDeltaMemory* m,
+                                              ImgStateKey pre_key,
+                                              ImgDeltaPayload payload,
+                                              uint16_t weight);
 
 const ImgDeltaUnit* img_delta_memory_get(const ImgDeltaMemory* m,
                                           uint32_t id);

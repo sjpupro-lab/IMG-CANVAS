@@ -270,6 +270,68 @@ static void test_learn_drives_pipeline_expansions(void) {
     PASS();
 }
 
+/* ── rarity weighting across repeated patterns ────────────── */
+
+static void test_rarity_weight_decreases_across_duplicates(void) {
+    TEST("first insert of a pattern gets max boost; duplicates decay to baseline");
+
+    ImgDeltaMemory* m = img_delta_memory_create();
+    assert(m);
+
+    /* Stage a pair whose single changed cell produces the SAME
+     * payload + pre_key every time we learn. Run learn repeatedly so
+     * we see multiple inserts for one L2 bucket. */
+    ImgCEGrid* before = img_ce_grid_create();
+    ImgCEGrid* after  = img_ce_grid_create();
+    assert(before && after);
+
+    /* Seed one cell on both grids; make `after` differ in the core
+     * channel so derive_payload emits a MODE_INTENSITY delta. */
+    ImgCECell* b = &before->cells[img_ce_idx(3, 3)];
+    ImgCECell* a = &after->cells [img_ce_idx(3, 3)];
+    b->semantic_role = a->semantic_role = IMG_ROLE_OBJECT;
+    b->tone_class    = a->tone_class    = IMG_TONE_DARK;
+    b->direction_class = a->direction_class = IMG_FLOW_NONE;
+    b->depth_class   = a->depth_class   = IMG_DEPTH_FOREGROUND;
+    b->last_delta_id = a->last_delta_id = IMG_DELTA_ID_NONE;
+    b->core = 40;
+    a->core = 80;   /* |Δ| = 40 → above noise floor */
+
+    /* First learn — bucket empty → weight = 4 × baseline. */
+    uint32_t added1 = img_delta_memory_learn_from_pair(m, before, after);
+    assert(added1 == 1);
+    uint16_t w1 = img_delta_memory_get(m, 0)->weight;
+    assert(w1 == 4 * (uint16_t)IMG_DELTA_WEIGHT_DEFAULT);   /* 4000 */
+
+    /* Second learn — bucket has 1 → weight = 2 × baseline. */
+    uint32_t added2 = img_delta_memory_learn_from_pair(m, before, after);
+    assert(added2 == 1);
+    uint16_t w2 = img_delta_memory_get(m, 1)->weight;
+    assert(w2 == 2 * (uint16_t)IMG_DELTA_WEIGHT_DEFAULT);   /* 2000 */
+
+    /* Third — count=2 → boost = 4/3 = 1 (integer div) → baseline. */
+    uint32_t added3 = img_delta_memory_learn_from_pair(m, before, after);
+    assert(added3 == 1);
+    uint16_t w3 = img_delta_memory_get(m, 2)->weight;
+    assert(w3 == (uint16_t)IMG_DELTA_WEIGHT_DEFAULT);       /* 1000 */
+
+    /* Ten more — all stay at baseline, never dip below. */
+    for (int i = 0; i < 10; i++) {
+        img_delta_memory_learn_from_pair(m, before, after);
+    }
+    for (uint32_t i = 3; i < img_delta_memory_count(m); i++) {
+        assert(img_delta_memory_get(m, i)->weight >=
+               (uint16_t)IMG_DELTA_WEIGHT_DEFAULT);
+    }
+    /* Rarity order is preserved across the run. */
+    assert(w1 > w2 && w2 > w3);
+
+    img_ce_grid_destroy(before);
+    img_ce_grid_destroy(after);
+    img_delta_memory_destroy(m);
+    PASS();
+}
+
 int main(void) {
     printf("=== test_img_delta_learn ===\n");
 
@@ -278,6 +340,7 @@ int main(void) {
     test_tag_precedence();
     test_numeric_noise_floor();
     test_learn_drives_pipeline_expansions();
+    test_rarity_weight_decreases_across_duplicates();
 
     printf("  %d/%d passed\n\n", tests_passed, tests_total);
     return (tests_passed == tests_total) ? 0 : 1;
