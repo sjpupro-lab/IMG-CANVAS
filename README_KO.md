@@ -80,6 +80,48 @@ Rarity sieve: 첫 등장 46개(×4 가중), 두 번째 등장 46개(×2), 나머
 
 ---
 
+## 캐릭터 10장 학습 데모
+
+간단 재현 데모 — 이미지 파이프라인 + delta memory + rarity sieve + CE snapshot 바인딩 전체를 한 번에 돌림.
+
+```bash
+cd spatial_ai
+./build/train --model build/char_trained/characters.spai \
+              --memory build/char_trained/characters.imem \
+              data/characters_manifest.tsv
+```
+
+**입력**: `assets/characters/`에 10장 (ruby, azure, moss, amber, slate, rose, noir, mint, sand, violet). 각각 동그란 머리 + 팔다리 스틱피겨, 색·포즈가 달라 CE 파이프라인이 서로 다른 tone/role/depth 버킷으로 분류.
+
+**매니페스트**: 링 구조로 연쇄 (`ruby → azure → … → violet → ruby`, 10행).
+
+**결과:**
+
+| 지표 | 값 |
+|---|---|
+| 매니페스트 행 | 10 / 10 |
+| 추가된 delta 수 | **7 633** |
+| keyframes | 10 |
+| CE snapshots | 10 |
+| 가중치 버킷 | baseline 7 607 · 2~4× 13 · ≥4× rare 13 |
+| `.spai` 크기 | ~4.5 MB (텍스트 격자 10 × ~328 KB + CE 스냅샷 + trailing record) |
+| `.imem` 크기 | ~299 KB (7 633 delta × 40 B + 16 B 헤더) |
+
+첫 등장 L2 버킷 13개가 rarity sieve에 잡혔고, 두 번째 링 반복에서 13개 더 적중. 나머지 7 607개는 baseline으로 공유 — **새 캐릭터 대부분이 이미 학습한 영역을 재사용한다는 뜻**.
+
+**샘플 CE 렌더** (via `./build/demo_pipeline --adapt`):
+
+| 원본 | Plain CE | Masked overlay |
+|---|---|---|
+| `char_01_ruby.png` | ![ruby plain](assets/characters/samples/ruby_plain.png) | ![ruby masked](assets/characters/samples/ruby_masked.png) |
+| `char_07_noir.png` | ![noir plain](assets/characters/samples/noir_plain.png) | ![noir masked](assets/characters/samples/noir_masked.png) |
+
+실루엣·몸통 구조가 64×64 CE 압축에서도 살아남음. masked 버전의 cyan은 resolve가 흡수한 outlier, red는 미해결(promoted) 셀.
+
+`--resume`로 이어 학습: 2회차는 units 15 266 / keyframes 20으로 두 배. rarity 카운트는 그대로 — sieve가 2회차엔 모든 패턴을 "이미 본 것"으로 인식.
+
+---
+
 ## 저장 포맷
 
 - `.spai` — SpatialAI 전체 상태 (텍스트 키프레임 + 델타 + 가중치 + EMA + 캔버스 풀 + CE 스냅샷). `ai_save_incremental` 지원.

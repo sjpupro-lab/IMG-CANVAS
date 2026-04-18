@@ -237,6 +237,56 @@ All suites green on every commit. The `img_delta_memory` suite alone covers 22 t
 
 ---
 
+## Character training demo — 10 silhouettes end-to-end
+
+A small reproducible run that exercises the whole bimodal path (image pipeline + delta memory + rarity sieve + CE-snapshot binding).
+
+```bash
+cd spatial_ai
+./build/train --model build/char_trained/characters.spai \
+              --memory build/char_trained/characters.imem \
+              data/characters_manifest.tsv
+```
+
+**Inputs** — ten deterministic 256×256 character PNGs under [`assets/characters/`](assets/characters/) (ruby, azure, moss, amber, slate, rose, noir, mint, sand, violet). Each is a round-head stick figure with a distinct body colour and pose variation so the CE pipeline sees different tone / role / depth buckets per character.
+
+**Manifest** ([`spatial_ai/data/characters_manifest.tsv`](spatial_ai/data/characters_manifest.tsv)) chains them ring-style: `ruby → azure → moss → … → violet → ruby`, 10 rows total.
+
+**Result:**
+
+| Metric | Value |
+|---|---|
+| manifest rows ingested | 10 / 10 |
+| deltas added | **7 633** |
+| keyframes | 10 (one per char, paired with text label) |
+| CE snapshots bound | 10 |
+| rarity buckets | baseline 7 607 · 2×–4× tier 13 · ≥4× rare 13 |
+| `characters.spai` | ~4.5 MB (10 text grids × ~328 KB + 10 CE snapshots + trailing records) |
+| `characters.imem` | ~299 KB (7 633 delta units × 40 B + 16 B header) |
+
+The sieve lit up **13 first-of-bucket + 13 second-of-bucket** patterns — the ten colour palettes produce genuinely new (semantic_role, tone, direction, depth) L2 buckets on first sight, and a handful of second-pass hits as the ring loops back through similar depth/flow buckets. The other 7 607 units collapsed to baseline, meaning subsequent chars mostly reuse learned regions.
+
+**Sample CE renders** (via `./build/demo_pipeline --adapt`):
+
+| Source | Plain CE render | Resolve-mask overlay |
+|---|---|---|
+| `assets/characters/char_01_ruby.png` | ![ruby plain](assets/characters/samples/ruby_plain.png) | ![ruby masked](assets/characters/samples/ruby_masked.png) |
+| `assets/characters/char_07_noir.png` | ![noir plain](assets/characters/samples/noir_plain.png) | ![noir masked](assets/characters/samples/noir_masked.png) |
+
+The silhouette + torso structure survives the 64×64 CE compression. Cyan cells in the masked version are resolve-absorbed outliers; red cells are promoted / unresolved.
+
+Resume the same run (`--resume` loads the prior `.spai` + `.imem` and keeps accumulating):
+
+```bash
+./build/train --resume --model build/char_trained/characters.spai \
+                       --memory build/char_trained/characters.imem \
+                       data/characters_manifest.tsv
+```
+
+A second pass doubles units (to 15 266) and keyframes (to 20), rarity counts unchanged — the sieve correctly recognises every pattern as "seen" on round two.
+
+---
+
 ## Related docs
 
 - [`spatial_ai/SPEC.md`](spatial_ai/SPEC.md) — text engine full specification
