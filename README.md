@@ -1,60 +1,68 @@
 # IMG-CANVAS
 
-**Dual-modality spatial pattern engine — text and image share one keyframe space.**
+**Dual-modality spatial pattern engine — text and image share one keyframe space, and the engine draws by *stamping* learned deltas, not by denoising noise.**
 
-Text is stored as a 256×256 brightness grid per clause. Images are stored as a 64×64 CE grid of interpreted cells. Both are bound to the same `Keyframe` so one lookup covers both modalities.
+![hero](assets/main_hero.png)
 
-Everything runs on **bounded-integer resume codes**: tiny state indices that reconstruct large values through precomputed lookup tables. No float, no softmax, no training loop — just store, match, re-expand.
-
-![architecture](assets/main_hero.png)
+Text is stored as a 256 × 256 brightness grid per clause. Images are stored as a 64 × 64 CE grid of interpreted cells. Both bind to the same `Keyframe`. Generation is *printer-mode* — the engine observes the cell's current state, picks a learned delta by top-G sampling with presence penalty, and stamps. Detail per region is not a mode switch; it's a cell-level attribute (`tier`, `priority`, `role`) and a brush reads those directly.
 
 ---
 
-## What you get
+## At a glance
 
-| Side | Input | Storage | Inference |
+| Modality | Input | Storage | Inference / generation |
 |---|---|---|---|
-| **Text** | line-per-clause UTF-8 | 256×256 RGBA grid, keyframe+delta chain, EMA priors, topic-hash bucket | `ai_predict`, `ai_generate_next`, `ai_recluster` |
-| **Image** | PNG/JPEG/BMP/TGA/PPM (any dim) | 64×64 CE grid of interpreted cells; 9 216-entry baked SoA delta tables | `img_pipeline_run` (seed → BFS expand → resolve), `img_delta_memory_learn_from_images` |
-| **Bimodal** | text label + image | `Keyframe.ce_snapshot` pointer per KF, saved via `SPAI_TAG_CE_SNAPSHOT = 0x08` | text-side match returns the paired CE snapshot; CE match returns the paired text grid |
+| **Text** | line-per-clause UTF-8 | 256 × 256 RGBA grid, keyframe + delta chain, EMA priors, topic-hash bucket | `ai_predict`, `ai_generate_next`, `ai_recluster` |
+| **Image** | PNG / JPEG / BMP / TGA / PPM, any dim | 64 × 64 CE grid of interpreted cells; 9 216-entry pre-baked SoA delta tables; multi-scale tier-diverse memory | `img_pipeline_run` (compress), `img_drawing_pass` (stamp), `img_delta_memory_learn_multiscale` |
+| **Bimodal** | text label + image | `Keyframe.ce_snapshot` pointer per KF, trailing record `SPAI_TAG_CE_SNAPSHOT = 0x08` | text-match returns paired CE snapshot; CE match returns paired text grid |
 
-Each engine scores 0..1 independently; the caller combines them (`joint = α·text + β·ce`) without any mixed state-key space.
+Each side scores independently on a 0..1 scale; callers combine (`joint = α·text + β·ce`) — no mixed state-key space.
 
 ---
 
 ## Architecture
 
 ```
-             ┌───────────────── text clause ─────────────┐
-             │ "The Eiffel Tower was built in 1887."     │
-             │                                           │
-             ▼                                           ▼
-         morpheme + word + byte layers              detect_data_type
-         3-layer bitmap × weights (1/2/1)           PROSE / DIALOG / CODE / SHORT
-             │                                           │
-             ▼                                           ▼
-         256×256 RGBA grid   ◄────── RGB EMA prior ──────┘
-             │                      (per-position stabiliser)
-             ▼
-         Keyframe (id, topic_hash, seq_in_topic, data_kind, ce_snapshot)
-             │                                           ▲
-             │                                           │
-             │   ┌────────── image (any dim RGB) ────────┘
-             │   ▼
-             │  SmallCanvas 256×256          ← R=intensity G=flow B=mood A=depth
-             │  CE grid     64×64            ← R=core G=link B=delta A=priority
-             │                                 + tone/role/dir/depth/delta_sign tags
-             │       │
-             │       ▼
-             │  seed (top-K priority) → BFS expand (best delta via O(1) SoA lookup)
-             │                       → resolve (outlier / explained / promoted)
-             │                       → auto-feedback (success_count ++ on surviving cells)
-             │
-             ▼
-         ai_save / ai_load  →  .spai (SPAI v8)    .imem (IMEM v1)
+           ┌────────────── text clause ──────────────┐
+           │                                         │
+           ▼                                         ▼
+       layers_encode_clause                    detect_data_type
+       (3-layer bitmap, EMA prior)             PROSE/DIALOG/CODE/SHORT
+           │                                         │
+           ▼                                         ▼
+       256 × 256 RGBA grid ◄─── topic_hash + seq_in_topic
+           │
+           ▼
+       Keyframe { id, grid, topic_hash, seq_in_topic,
+                  data_kind, ce_snapshot }
+           │                                         ▲
+           │                                         │
+           │    ┌── image (RGB, any dim) ────────────┘
+           │    ▼
+           │   img_image_to_small_canvas  →  SmallCanvas 256 × 256
+           │          (R=intensity · G=flow · B=mood · A=depth)
+           │    ▼
+           │   img_small_canvas_to_ce     →  CE grid 64 × 64
+           │          (R=core · G=link · B=delta · A=priority
+           │           + tone / role / direction / depth / delta_sign
+           │           + tier / last_delta_id)
+           │
+           ▼
+      ┌─── COMPRESS PATH ───────────────────────────────┐
+      │  img_pipeline_run: seed → BFS expand → resolve │
+      │  → auto-feedback → .spai / .imem                │
+      └────────────────────────────────────────────────┘
+
+      ┌─── GENERATE PATH ───────────────────────────────┐
+      │  img_drawing_pass(grid, memory, opts):          │
+      │    for each cell:                                │
+      │      topg + presence penalty + brush bias →     │
+      │      pick → apply → bump recent_counts          │
+      │  Brush: region_mask · target_tier · target_role │
+      └────────────────────────────────────────────────┘
 ```
 
-Two engines, one container. No mixed StateKey space — the Keyframe id is the only shared surface.
+The two engines meet at `Keyframe`. `img_pipeline_run` and `img_drawing_pass` are mirror entry points — compress / decompress / stamp all through the same CE primitives.
 
 ---
 
@@ -63,64 +71,121 @@ Two engines, one container. No mixed StateKey space — the Keyframe id is the o
 ```bash
 cd spatial_ai
 
-make           # build engine
-make test      # 21 suites (12 text + 9 image/bimodal)
-make demo      # build demo_pipeline CLI
-make train     # build image training CLI
-make chat      # build interactive chat REPL
-make stream    # build stream_train for text corpora
+make              # build engine objects
+make test         # 22 suites: 12 text + 10 image/bimodal
+make demo         # image pipeline visualiser
+make train        # bimodal training CLI (manifest → .spai + .imem)
+make chat         # interactive text/image REPL
+make stream       # text streaming trainer
+make gen-tables   # regenerate baked CE delta tables (rare)
 ```
 
-### Run a bimodal training pass on the bundled images
+### Run bimodal training on the bundled characters
 
 ```bash
-./build/train --model out.spai --memory out.imem data/train_manifest.tsv
+./build/train --model out.spai --memory out.imem data/characters_manifest.tsv
 ```
 
-6 cross-pair rows over `main_hero.png`, `visualization_1.png`, `visualization_2.png`:
+Ten synthetic stick-figure silhouettes (`assets/characters/`) chained in a ring. Baseline result:
 
 ```
-  [1] hero to visualization 1             +3 734 deltas  kf=0  ce=yes
-  [2] visualization 1 to hero             +3 734 deltas  kf=1  ce=yes
-  ...
-=== train summary ===
-  deltas added:     22 790
-  weight buckets:   46 rare / 46 second / 22 698 baseline
-  keyframes:        6
-  ce snapshots:     6
+deltas added:      7 633
+keyframes:         10
+CE snapshots:      10
+rarity buckets:    baseline 7 607 · ×2–4 13 · ≥4× 13
 ```
 
-The rarity sieve caught 46 first-of-bucket patterns + 46 second-of-bucket; everything else collapsed to baseline weight.
-
-### Visualise the CE state
+### Visualise CE compression of any image
 
 ```bash
 ./build/demo_pipeline --adapt assets/main_hero.png out/hero
 ```
 
-Writes `out/hero_plain.{png,ppm}` (CE-rendered image) and `out/hero_masked.{png,ppm}` (same + resolve-mask tint: cyan = absorbed, red = unresolved).
+Writes `out/hero_plain.{png,ppm}` and `out/hero_masked.{png,ppm}` — the masked variant tints cyan for resolve-absorbed cells and red for promoted (unresolved) ones.
 
 ### Stream-train on a text corpus
 
 ```bash
 ./build/stream_train --input data/wiki5k.txt --max 5000 \
-                     --save build/models/wiki5k.spai --verify
+                     --save build/models/wiki5k.spai \
+                     --checkpoint 5000 --verify
 ```
 
-Writes checkpoints every 5 000 clauses, auto-calibrates the delta/keyframe threshold if `--target-delta R` is set, re-clusters after training.
+Supports `--target-delta R` for threshold auto-calibration and post-training recluster.
 
-### Interactive chat REPL
+### Interactive chat
 
 ```bash
 ./build/chat --load build/models/wiki5k.spai --session build/chat.session
-> /ret how are you
-> /topk 5 eiffel tower
-> /gen tell me about the tower
-> /img a sunset over paris    # routes to $IMG_CANVAS_BIN if set
-> :save build/chat.session
+> /ret how are you          # retrieve nearest clauses
+> /topk 5 eiffel tower      # top-K retrieval
+> /gen tell me about it     # text generation
+> /img sunset over paris    # route to $IMG_CANVAS_BIN if set
+> :history / :reset / :ctx 5 / :save <path> / :load <path>
 ```
 
-`:history / :reset / :ctx N` manage the turn buffer (ring, max 8). Sessions round-trip to disk via `:save <path>` and `:load <path>` or the `--session` flag.
+Ring-buffer turn context (max 8), per-turn query router, session disk round-trip.
+
+---
+
+## Drawing mode — the "printer"
+
+The engine doesn't denoise from noise. It observes the current CE state, picks a learned delta, and stamps. Diversity comes from a presence penalty (same idea as LM coverage / presence penalty) instead of temperature.
+
+```c
+ImgDrawingOptions opt = img_drawing_default_options();
+opt.top_g            = 4;     /* pool size per cell */
+opt.presence_penalty = 0.5;   /* α; subtracted per recent pick */
+opt.passes           = 3;     /* underdrawing → detail layering */
+
+img_drawing_pass(grid, memory, &opt, &stats);
+```
+
+### Brush — region · tier · role control
+
+Single memory, different brushes, different outputs:
+
+```c
+uint8_t face_mask[IMG_CE_TOTAL];
+img_brush_mask_rect(face_mask, 22, 10, 42, 28);
+
+opt.region_mask  = face_mask;         /* only these cells */
+opt.target_tier  = IMG_TIER_T3;       /* structure-level detail */
+opt.target_role  = IMG_ROLE_FACE;
+opt.tier_bonus   = 0.25;              /* score bonus when payload tier matches */
+opt.role_bonus   = 0.20;              /* ditto for role */
+
+img_drawing_pass(grid, memory, &opt, &face_stats);
+
+// then a broader, looser brush for clothes:
+img_brush_mask_rect(clothes_mask, 15, 28, 50, 58);
+opt.region_mask = clothes_mask;
+opt.target_tier = IMG_TIER_T2;
+opt.target_role = IMG_ROLE_OBJECT;
+img_drawing_pass(grid, memory, &opt, &clothes_stats);
+```
+
+Per-pass stats surface `cells_masked_out`, `brush_bonus_wins`, `unique_deltas_used`, `max_recent_count`.
+
+---
+
+## Multi-scale learn — tier-diverse rules from one image
+
+```c
+uint32_t radii[] = { 32, 12, 4, 0 };    /* coarsest → finest */
+img_delta_memory_learn_multiscale(memory, image_rgb, w, h, radii, 4);
+```
+
+A separable O(w·h) box-blur cascade produces three adjacent (coarser → finer) pairs. Each pair feeds `learn_from_images`; the blur step controls which tier each pair lights up: big blur gap → T3 (structure) deltas; small gap → T1 (fine). Run on a 1280 × 720 portrait:
+
+```
+deltas added:      2 560
+tier histogram:    T1 814 · T2 1 425 · T3 321
+mode histogram:    INTENSITY 1 849 · DIRECTION 394 · MOOD 201 · ROLE 116
+rarity buckets:    baseline 2 490 · 2–4× 33 · ≥4× 37
+```
+
+The tier spread is exactly what the cascade was designed to produce. `Drawing_pass` on an empty canvas with this memory still yields abstract pattern — that's the **Phase D** gap: there's no spatial seed yet, so every cell sees the same fallback context. Seed from a matching keyframe (`ai_predict` → `Keyframe.ce_snapshot`) is the next PR.
 
 ---
 
@@ -129,32 +194,45 @@ Writes checkpoints every 5 000 clauses, auto-calibrates the delta/keyframe thres
 | Tool | What it does | Source |
 |---|---|---|
 | `chat`          | REPL with turn-context + query router (`/gen /ret /img /topk`) + session persistence | `tools/chat.c` |
-| `stream_train`  | Line-by-line text ingest with checkpointing + auto-threshold calibration + optional training-event log | `tools/stream_train.c` |
-| `train`         | Batch image training from a TSV manifest. Emits `.spai` + `.imem`, supports `--resume` | `tools/train.c` |
-| `demo_pipeline` | One-shot image → CE → render. `--adapt` for per-image tier thresholds; PNG + PPM outputs | `tools/demo_pipeline.c` |
-| `gen_delta_tables` | Offline generator for the baked SoA CE delta tables (runs `make gen-tables`) | `tools/gen_delta_tables.c` |
-| `bench_perplexity`, `bench_word_predict`, `bench_qa`, `bench_stsb` | Text-engine benchmark suites | `tests/bench_*.c` |
+| `stream_train`  | Line-by-line text ingest with checkpointing, long-line auto-split, auto-threshold calibration | `tools/stream_train.c` |
+| `train`         | Batch image training from a TSV manifest; emits `.spai` + `.imem`; `--resume` supported | `tools/train.c` |
+| `demo_pipeline` | One-shot image → CE → render. `--adapt` for per-image tier thresholds; emits PNG + PPM | `tools/demo_pipeline.c` |
+| `gen_delta_tables` | Offline generator for the baked SoA CE delta tables | `tools/gen_delta_tables.c` |
+| `bench_*`       | Text-engine benchmarks (perplexity, word-predict, QA, STS-B) | `tests/bench_*.c` |
 
 ---
 
 ## Training data formats
 
-**Text (line-per-clause)** — UTF-8, one clause per line. The engine auto-classifies each line into PROSE / DIALOG / CODE / SHORT based on length and special-char ratio, and per-type thresholds drive the keyframe/delta decision.
+- **Text** — one clause per UTF-8 line. Auto-classified (PROSE / DIALOG / CODE / SHORT) by length + special-char ratio; per-type thresholds drive keyframe/delta routing. Lines longer than `--max-line-bytes` (default 256 = grid Y axis) auto-split at sentence boundaries.
+- **Image** — any format `stb_image` reads (PNG / JPEG / BMP / TGA) or binary P6 PPM. Dim bounds `[16, 16384]` enforced. RGB only — alpha dropped. Block-averaged to 256 × 256.
+- **Bimodal TSV manifest** — one row per learning example:
+  ```
+  <text_label>\t<before_image>\t<after_image>
+  hero to visualization 1	assets/main_hero.png	assets/visualization_1.png
+  ```
+  Comments (`#`) and blank lines ignored.
 
-**Image** — any format stb_image reads (PNG, JPEG, BMP, TGA) or binary P6 PPM. Any dimension ≥ 1×1 is accepted; the pipeline block-averages to 256×256. RGB only — alpha is dropped.
+---
 
-**Bimodal TSV manifest** — one row per learning example:
+## File formats
 
-```
-<text_label>\t<before_image>\t<after_image>
-hero to visualization 1	assets/main_hero.png	assets/visualization_1.png
-```
+**SPAI (text side + bimodal)** — `magic[4]="SPAI"` · `version` · `kf_count` · `df_count` · `reserved[3]` (`reserved[0]` = save Unix timestamp), followed by a tagged record stream:
 
-Comments start with `#`. Blank lines skipped.
+| Tag | Meaning |
+|---|---|
+| `0x01` KEYFRAME      | `id, label, text_byte_count, topic_hash, seq_in_topic, data_kind, grid.ARGB` |
+| `0x02` DELTA         | sparse `(index, dA, dR, dG, dB)` entries against parent |
+| `0x03` WEIGHTS       | per-channel adaptive weights (4 × float) |
+| `0x04` CANVAS        | full 2048 × 1024 canvas snapshot |
+| `0x05` SUBTITLE      | subtitle track |
+| `0x06` EMA           | RGB EMA priors (4 × GRID_TOTAL × float) |
+| `0x07` CANVAS_DELTA  | P-frame canvas (sparse A/R/G/B diff vs parent) |
+| `0x08` CE_SNAPSHOT   | **bimodal: image-side CE grid bound to a keyframe** |
 
-**Model files:**
-- `.spai` — SpatialAI (text keyframes + deltas + weights + EMA tables + canvas pool + CE snapshots). Append-only save via `ai_save_incremental`.
-- `.imem` — DeltaMemory (image-side symbolic rules, 40 bytes per unit, little-endian explicit fields).
+Older readers stop cleanly at unknown tags. `ai_peek_header_ex` surfaces `kf_count / df_count / version / save_timestamp` without loading the model.
+
+**IMEM (image-side delta memory)** — `magic[4]="IMEM"` · `version` · `count` · `reserved`, followed by `count` × 40-byte unit records. Fields packed explicitly (little-endian); layout independent of struct padding. One record per `ImgDeltaUnit` including `id / pre_key / post_hint / payload.state / role_target / usage_count / success_count / weight`.
 
 ---
 
@@ -162,54 +240,33 @@ Comments start with `#`. Blank lines skipped.
 
 ```
 IMG-CANVAS/
-├── assets/                        hero / demo images used by this README
+├── assets/
+│   ├── main_hero.png  visualization_{1,2}.png
+│   └── characters/               bundled 10-char training set
 ├── docs/
-│   └── benchmarks/
-│       └── v2_text_engine/        wiki5k + wiki20k benchmark reports
+│   └── benchmarks/v2_text_engine/  wiki5k / wiki20k reports
 ├── spatial_ai/
-│   ├── SPEC.md                    text engine spec v3
-│   ├── SPEC-CE.md                 image CE engine spec v1
-│   ├── SPEC-ENGINE.md             engine-level optimisation notes
-│   ├── TODO_recluster.md          recluster / calibration roadmap
-│   ├── README.md                  text-engine local README (KR)
-│   ├── Makefile                   unified build + tests + tools
+│   ├── SPEC.md                   text engine spec v3
+│   ├── SPEC-CE.md                image CE engine spec v1
+│   ├── SPEC-ENGINE.md            optimisation notes
+│   ├── TODO_recluster.md         recluster / calibration roadmap
+│   ├── README.md                 text-engine local README (KR)
+│   ├── Makefile
 │   ├── include/
-│   │   ├── spatial_*.h            text engine (12 headers)
-│   │   ├── spatial_bimodal.h      text ↔ image binding layer
-│   │   └── img_*.h                image CE engine (9 headers)
-│   ├── src/
-│   │   ├── spatial_*.c            text engine
-│   │   ├── spatial_bimodal.c      bimodal bind / get / release
-│   │   ├── img_*.c                image CE engine
-│   │   └── img_delta_tables_data.c  AUTO-GENERATED baked tables
-│   ├── tests/                     21 unit suites (make test)
-│   ├── tools/                     chat / stream_train / train / demo_pipeline / gen_delta_tables
-│   ├── third_party/               stb_image + stb_image_write (public domain)
-│   └── data/                      sample corpora + training manifests
-├── README.md                      this file
-└── README_KO.md                   Korean mirror
+│   │   ├── spatial_*.h           text engine (12 headers)
+│   │   ├── spatial_bimodal.h     text ↔ image binding
+│   │   └── img_*.h               image CE engine + drawing (10 headers)
+│   ├── src/                      one .c per header + img_delta_tables_data.c (GENERATED)
+│   ├── tests/                    22 unit suites (make test)
+│   ├── tools/                    chat / stream_train / train / demo_pipeline / gen_delta_tables
+│   ├── third_party/              stb_image + stb_image_write (public domain)
+│   └── data/
+│       ├── characters_manifest.tsv
+│       ├── train_manifest.tsv
+│       └── training/             user-local images (gitignored)
+├── README.md                     this file
+└── README_KO.md                  Korean summary
 ```
-
----
-
-## File formats
-
-**SPAI (text side + bimodal):** `magic[4]="SPAI" | version=u32 | kf_count=u32 | df_count=u32 | reserved[3]`, followed by a tagged record stream. Tags in use:
-
-| Tag | Meaning |
-|---|---|
-| `0x01` KEYFRAME      | `id, label, text_byte_count, topic_hash, seq_in_topic, data_kind, grid.ARGB` |
-| `0x02` DELTA         | sparse (index, dA, dR, dG, dB) entries against parent |
-| `0x03` WEIGHTS       | per-channel adaptive weights (4 × float) |
-| `0x04` CANVAS        | full 2048×1024 subtitle canvas snapshot |
-| `0x05` SUBTITLE      | subtitle track |
-| `0x06` EMA           | RGB EMA prior (4 × GRID_TOTAL × float) |
-| `0x07` CANVAS_DELTA  | P-frame canvas (sparse A/R/G/B diff vs parent) |
-| `0x08` CE_SNAPSHOT   | **bimodal: image-side CE grid bound to a keyframe** |
-
-Trailing records are forward-compatible — older readers stop cleanly on unknown tags.
-
-**IMEM (image-side delta memory):** `magic[4]="IMEM" | version=u32 | count=u32 | reserved=u32`, followed by `count` × 40-byte unit records. Fields packed explicitly (little-endian); layout independent of struct padding.
 
 ---
 
@@ -219,81 +276,39 @@ Trailing records are forward-compatible — older readers stop cleanly on unknow
 cd spatial_ai && make test
 ```
 
-| Group | Suites | Tests |
+| Group | Suite | Tests |
 |---|---|---|
 | **Text engine** | grid, morpheme, layers, match, keyframe, context, integration, io, cascade, canvas, adaptive, subtitle | 12 |
-| **Image CE**    | img_ce, img_delta_memory, img_set16, img_render, img_pipeline, img_tier_table, img_delta_learn, img_ce_diff | 8 |
+| **Image CE**    | img_ce, img_delta_memory (24 cases), img_set16, img_render, img_pipeline, img_tier_table, img_delta_learn (8 cases), img_ce_diff, img_drawing (9 cases) | 9 |
 | **Bimodal**     | test_bimodal | 1 |
-| **Total**       |              | 21 |
+| **Total**       | | **22 suites** |
 
-All suites green on every commit. The `img_delta_memory` suite alone covers 22 test cases including StateKey packing, Laplace scoring, weighted-rarity inserts, save/load round-trip, and bad-magic rejection.
+All green on every commit.
 
 ---
 
 ## Benchmarks
 
-- Text: `docs/benchmarks/v2_text_engine/` — reference wiki5k and wiki20k runs with matching / self-recall / word-prediction / byte-perplexity / generation numbers under the v2 engine (commit `4c4e108`).
-- Image: `./build/train` run on the bundled manifest reproduces `+22 790 deltas / 6 kf / 6 ce snapshots / 46+46 rare-bucket hits` (see Quick start).
+- **Text** — `docs/benchmarks/v2_text_engine/` — reference wiki5k and wiki20k runs with matching / self-recall / word-prediction / byte-perplexity / generation numbers under the v2 engine (commit `4c4e108`).
+- **Image** — bimodal `./build/train` on the bundled character manifest reproduces `+7 633 deltas / 10 kf / 10 ce snapshots / 13 + 13 rare-bucket hits`. Multi-scale learn on a 1280 × 720 subject produces `+2 560 deltas` with tier spread `T1 814 · T2 1 425 · T3 321`.
 
 ---
 
-## Character training demo — 10 silhouettes end-to-end
+## Known limits (as of current main)
 
-A small reproducible run that exercises the whole bimodal path (image pipeline + delta memory + rarity sieve + CE-snapshot binding).
-
-```bash
-cd spatial_ai
-./build/train --model build/char_trained/characters.spai \
-              --memory build/char_trained/characters.imem \
-              data/characters_manifest.tsv
-```
-
-**Inputs** — ten deterministic 256×256 character PNGs under [`assets/characters/`](assets/characters/) (ruby, azure, moss, amber, slate, rose, noir, mint, sand, violet). Each is a round-head stick figure with a distinct body colour and pose variation so the CE pipeline sees different tone / role / depth buckets per character.
-
-**Manifest** ([`spatial_ai/data/characters_manifest.tsv`](spatial_ai/data/characters_manifest.tsv)) chains them ring-style: `ruby → azure → moss → … → violet → ruby`, 10 rows total.
-
-**Result:**
-
-| Metric | Value |
-|---|---|
-| manifest rows ingested | 10 / 10 |
-| deltas added | **7 633** |
-| keyframes | 10 (one per char, paired with text label) |
-| CE snapshots bound | 10 |
-| rarity buckets | baseline 7 607 · 2×–4× tier 13 · ≥4× rare 13 |
-| `characters.spai` | ~4.5 MB (10 text grids × ~328 KB + 10 CE snapshots + trailing records) |
-| `characters.imem` | ~299 KB (7 633 delta units × 40 B + 16 B header) |
-
-The sieve lit up **13 first-of-bucket + 13 second-of-bucket** patterns — the ten colour palettes produce genuinely new (semantic_role, tone, direction, depth) L2 buckets on first sight, and a handful of second-pass hits as the ring loops back through similar depth/flow buckets. The other 7 607 units collapsed to baseline, meaning subsequent chars mostly reuse learned regions.
-
-**Sample CE renders** (via `./build/demo_pipeline --adapt`):
-
-| Source | Plain CE render | Resolve-mask overlay |
-|---|---|---|
-| `assets/characters/char_01_ruby.png` | ![ruby plain](assets/characters/samples/ruby_plain.png) | ![ruby masked](assets/characters/samples/ruby_masked.png) |
-| `assets/characters/char_07_noir.png` | ![noir plain](assets/characters/samples/noir_plain.png) | ![noir masked](assets/characters/samples/noir_masked.png) |
-
-The silhouette + torso structure survives the 64×64 CE compression. Cyan cells in the masked version are resolve-absorbed outliers; red cells are promoted / unresolved.
-
-Resume the same run (`--resume` loads the prior `.spai` + `.imem` and keeps accumulating):
-
-```bash
-./build/train --resume --model build/char_trained/characters.spai \
-                       --memory build/char_trained/characters.imem \
-                       data/characters_manifest.tsv
-```
-
-A second pass doubles units (to 15 266) and keyframes (to 20), rarity counts unchanged — the sieve correctly recognises every pattern as "seen" on round two.
+- **Drawing on an empty canvas has no spatial intent yet.** Every cell sees the same L6-fallback context, so `drawing_pass` produces abstract pattern. Fix: seed from a matching keyframe's `ce_snapshot` (Phase D).
+- **Pixel realisation is still SlotShape** (center / cross / corners / border dots per cell scaled by tier). A tier-aware rasteriser that turns each cell into coherent pixel strokes is the next render-side upgrade.
+- **Compositional operators** (pose + palette + style as independent axes) aren't factored yet. Current axes are bounded (tier / scale / sign / mode / tick / channel_layout / slot_shape) but training never slices by intent.
 
 ---
 
 ## Related docs
 
-- [`spatial_ai/SPEC.md`](spatial_ai/SPEC.md) — text engine full specification
+- [`spatial_ai/SPEC.md`](spatial_ai/SPEC.md) — text engine specification
 - [`spatial_ai/SPEC-CE.md`](spatial_ai/SPEC-CE.md) — image CE engine specification v1
 - [`spatial_ai/SPEC-ENGINE.md`](spatial_ai/SPEC-ENGINE.md) — performance / layout notes
-- [`spatial_ai/TODO_recluster.md`](spatial_ai/TODO_recluster.md) — recluster & calibration roadmap
-- [`README_KO.md`](README_KO.md) — Korean summary
+- [`spatial_ai/TODO_recluster.md`](spatial_ai/TODO_recluster.md) — recluster roadmap
+- [`README_KO.md`](README_KO.md) — 한국어 요약
 
 ---
 
