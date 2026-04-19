@@ -56,10 +56,40 @@ static int mkdir_portable(const char* path) {
 }
 #endif
 
+/* mkdir -p: walk the path and create every missing parent.
+ * Accepts both '/' and '\' separators; tolerates trailing slashes.
+ * Returns 1 on success (or "already exists"), 0 on failure. */
 static int ensure_dir(const char* path) {
+    if (!path || !*path) return 0;
     struct stat st;
     if (stat(path, &st) == 0) return 1;
-    return mkdir_portable(path) == 0;
+
+    char buf[4096];
+    size_t n = strlen(path);
+    if (n >= sizeof(buf)) return 0;
+    memcpy(buf, path, n + 1);
+
+    /* Normalise separators to '/' so we can walk them uniformly. */
+    for (size_t i = 0; i < n; i++) if (buf[i] == '\\') buf[i] = '/';
+
+    /* Skip leading '/' (absolute) or drive-letter (Windows "C:/"). */
+    size_t start = 0;
+    if (buf[0] == '/') start = 1;
+#ifdef _WIN32
+    if (n >= 3 && buf[1] == ':' && buf[2] == '/') start = 3;
+#endif
+
+    for (size_t i = start; i <= n; i++) {
+        if (buf[i] == '/' || buf[i] == '\0') {
+            char save = buf[i];
+            buf[i] = '\0';
+            if (buf[start] && stat(buf, &st) != 0) {
+                if (mkdir_portable(buf) != 0) return 0;
+            }
+            buf[i] = save;
+        }
+    }
+    return 1;
 }
 
 static int ensure_subdir(const char* base, const char* sub, char* out, size_t cap) {
@@ -213,7 +243,7 @@ int main(int argc, char** argv) {
     }
 
     /* Prepare output directory. */
-    char frames_dir[1024];
+    char frames_dir[2048];
     if (!ensure_dir(args.out_dir) ||
         !ensure_subdir(args.out_dir, "frames", frames_dir, sizeof(frames_dir))) {
         fprintf(stderr, "cannot create output dir %s\n", args.out_dir);
@@ -228,7 +258,7 @@ int main(int argc, char** argv) {
     opt.passes           = 1;   /* we drive the pass count externally */
 
     ImgRenderOptions ropt = img_render_default_options();
-    char path[1024];
+    char path[4096];
     uint32_t total_stamps = 0, total_unique_max = 0;
 
     for (uint32_t f = 0; f < args.frames; f++) {
