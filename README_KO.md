@@ -85,26 +85,83 @@ make gen-tables   # 구운 CE delta 테이블 재생성 (드묾)
 
 ### Windows (PowerShell, MSYS2 + MinGW-w64)
 
+#### 처음 1회 — 툴체인 설치
+
+`gcc` / `mingw32-make`가 PATH에 없으면 **한 번만** 해두면 됨.
+
+1. **MSYS2 설치** — 둘 중 하나:
+   - `winget install MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements`
+   - 또는 https://www.msys2.org 에서 설치파일 받아서 실행 (옵션은 기본값 — `C:\msys64`에 설치됨).
+2. **시작 메뉴의 "MSYS2 MINGW64"** (파란 M 아이콘) 실행:
+   ```bash
+   pacman -Syu                 # Y 엔터. 창이 자동으로 닫힘 (정상)
+   ```
+   "MSYS2 MINGW64" 다시 열고:
+   ```bash
+   pacman -S --needed --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+   ```
+3. **PowerShell에서 사용자 PATH에 `C:\msys64\mingw64\bin` 추가** (한 번만):
+   ```powershell
+   $mingw = "C:\msys64\mingw64\bin"
+   $cur   = [Environment]::GetEnvironmentVariable("Path","User")
+   if ($cur -notlike "*$mingw*") {
+       [Environment]::SetEnvironmentVariable("Path", "$cur;$mingw", "User")
+   }
+   ```
+4. **PowerShell 창을 완전히 닫고** 새로 열어 확인:
+   ```powershell
+   gcc --version
+   mingw32-make --version
+   ```
+
+버전이 뜨면 준비 끝.
+
+#### 빌드 → 테스트 → 학습 → 그리기
+
 ```powershell
-# repo 루트에서, PATH에 mingw32-make + gcc가 잡힌 상태로.
-scripts\windows\build.ps1               # 엔진 + 모든 도구 빌드
-scripts\windows\test.ps1                # 전체 suite 실행
+cd C:\path\to\IMG-CANVAS                  # repo 루트
 
-scripts\windows\train.ps1 `
+.\scripts\windows\build.ps1               # 엔진 + 툴 6개
+.\scripts\windows\build.ps1 -Clean        # build\ 날리고 새로
+.\scripts\windows\test.ps1                # 전체 테스트 스위트
+
+# ── 학습: 번들 10개 캐릭터 ───────────────────────────────
+.\scripts\windows\train.ps1 `
   -Manifest spatial_ai\data\characters_manifest.tsv `
-  -Name characters                      # → out\models\characters.{spai,imem}
+  -Name characters                        # → out\models\characters.{spai,imem}
 
-scripts\windows\draw.ps1 `
+# ── 그리기 (A) 학습된 keyframe seed — 제일 좋은 결과 ─────
+.\scripts\windows\draw.ps1 `
   -Memory out\models\characters.imem `
   -Model  out\models\characters.spai `
-  -SeedKf 0 -Frames 8 -Name kf0         # → out\draw\kf0\final.png (+frames\)
+  -SeedKf 0 -Frames 8 -Name kf0           # → out\draw\kf0\final.png (+frames\)
 
-scripts\windows\demo.ps1 `
+# ── 그리기 (B) 임의 이미지로 seed ────────────────────────
+.\scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -SeedImage assets\characters\char_01_ruby.png `
+  -Frames 8 -Name from_ruby
+
+# ── 그리기 (C) seed 없음 — 추상 무늬만 나옴 ──────────────
+.\scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -Frames 8 -Name blank
+
+# ── 압축 시각화 ──────────────────────────────────────────
+.\scripts\windows\demo.ps1 `
   -Image assets\main_hero.png `
-  -Name hero                            # → out\demo\hero_{plain,masked}.png
+  -Name hero                              # → out\demo\hero_{plain,masked}.png
 ```
 
-모든 출력물은 `out\` 아래로 떨어짐 (gitignore됨). 구조는 `out\README.md` 참조.
+모든 출력물은 `out\` 아래 (gitignore됨). 구조는 `out\README.md`.
+
+| 스크립트 | 필수 | 자주 쓰는 옵션 |
+|---|---|---|
+| `build.ps1` | — | `-Clean` · `-Make make` (`mingw32-make` 대신 다른 make 쓸 때) |
+| `test.ps1`  | — | `-Make make` |
+| `train.ps1` | `-Manifest <tsv>` | `-Name <run>` · `-Resume` |
+| `draw.ps1`  | `-Memory <imem>` | `-Model <spai>` · `-SeedKf <N>` · `-SeedImage <png>` · `-Frames 8` · `-TopG 4` · `-Penalty 0.5` · `-Name <run>` |
+| `demo.ps1`  | `-Image <png>` | `-Name <run>` · `-NoAdapt` |
 
 ### 번들 캐릭터로 양모달 학습
 

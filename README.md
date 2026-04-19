@@ -83,26 +83,83 @@ make gen-tables   # regenerate baked CE delta tables (rare)
 
 ### Windows (PowerShell, MSYS2 + MinGW-w64)
 
+#### First-time setup — install the toolchain
+
+No `gcc` / `mingw32-make` on your box yet? Do this **once**.
+
+1. **Install MSYS2.** Either:
+   - `winget install MSYS2.MSYS2 --accept-source-agreements --accept-package-agreements`
+   - …or download the installer from https://www.msys2.org → run it → leave every option at default (installs to `C:\msys64`).
+2. **Open "MSYS2 MINGW64"** from the Start menu (the **blue** icon) and run:
+   ```bash
+   pacman -Syu                 # Y to proceed; the window may auto-close
+   ```
+   Reopen "MSYS2 MINGW64" and:
+   ```bash
+   pacman -S --needed --noconfirm mingw-w64-x86_64-gcc mingw-w64-x86_64-make
+   ```
+3. **Add `C:\msys64\mingw64\bin` to your user PATH** (PowerShell, one-shot):
+   ```powershell
+   $mingw = "C:\msys64\mingw64\bin"
+   $cur   = [Environment]::GetEnvironmentVariable("Path","User")
+   if ($cur -notlike "*$mingw*") {
+       [Environment]::SetEnvironmentVariable("Path", "$cur;$mingw", "User")
+   }
+   ```
+4. **Close every PowerShell window and open a fresh one**, then verify:
+   ```powershell
+   gcc --version
+   mingw32-make --version
+   ```
+
+Got versions? You're ready.
+
+#### Build → test → train → draw
+
 ```powershell
-# From the repo root, with mingw32-make + gcc on PATH.
-scripts\windows\build.ps1               # builds engine + all tools
-scripts\windows\test.ps1                # runs every suite
+cd C:\path\to\IMG-CANVAS                  # repo root
 
-scripts\windows\train.ps1 `
+.\scripts\windows\build.ps1               # engine + all 6 tools
+.\scripts\windows\build.ps1 -Clean        # nuke build\ first
+.\scripts\windows\test.ps1                # run every test suite
+
+# ── train: bundled 10-character set ──────────────────────
+.\scripts\windows\train.ps1 `
   -Manifest spatial_ai\data\characters_manifest.tsv `
-  -Name characters                      # → out\models\characters.{spai,imem}
+  -Name characters                        # → out\models\characters.{spai,imem}
 
-scripts\windows\draw.ps1 `
+# ── draw (A) seed from a trained keyframe — best output ──
+.\scripts\windows\draw.ps1 `
   -Memory out\models\characters.imem `
   -Model  out\models\characters.spai `
-  -SeedKf 0 -Frames 8 -Name kf0         # → out\draw\kf0\final.png (+frames\)
+  -SeedKf 0 -Frames 8 -Name kf0           # → out\draw\kf0\final.png (+frames\)
 
-scripts\windows\demo.ps1 `
+# ── draw (B) seed from any image ─────────────────────────
+.\scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -SeedImage assets\characters\char_01_ruby.png `
+  -Frames 8 -Name from_ruby
+
+# ── draw (C) no seed — abstract pattern only ─────────────
+.\scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -Frames 8 -Name blank
+
+# ── compress visualiser ──────────────────────────────────
+.\scripts\windows\demo.ps1 `
   -Image assets\main_hero.png `
-  -Name hero                            # → out\demo\hero_{plain,masked}.png
+  -Name hero                              # → out\demo\hero_{plain,masked}.png
 ```
 
-All outputs land under `out\` (gitignored). See `out\README.md` for the layout.
+Every output lands under `out\` (gitignored). See `out\README.md` for the layout.
+
+| Script | Required | Common options |
+|---|---|---|
+| `build.ps1` | — | `-Clean` · `-Make make` (override `mingw32-make`) |
+| `test.ps1`  | — | `-Make make` |
+| `train.ps1` | `-Manifest <tsv>` | `-Name <run>` · `-Resume` |
+| `draw.ps1`  | `-Memory <imem>` | `-Model <spai>` · `-SeedKf <N>` · `-SeedImage <png>` · `-Frames 8` · `-TopG 4` · `-Penalty 0.5` · `-Name <run>` |
+| `demo.ps1`  | `-Image <png>` | `-Name <run>` · `-NoAdapt` |
 
 ### Run bimodal training on the bundled characters
 
