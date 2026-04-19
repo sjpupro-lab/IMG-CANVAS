@@ -17,6 +17,16 @@
  * keyframe/delta store accumulates — no full-file buffering.
  */
 
+/* Expose fseeko/ftello via the POSIX.1-2001 + large-file feature macros.
+ * Must precede any libc header. MinGW ignores them; glibc needs them
+ * to prototype fseeko/ftello. */
+#ifndef _POSIX_C_SOURCE
+#  define _POSIX_C_SOURCE 200112L
+#endif
+#ifndef _FILE_OFFSET_BITS
+#  define _FILE_OFFSET_BITS 64
+#endif
+
 #include "spatial_grid.h"
 #include "spatial_layers.h"
 #include "spatial_morpheme.h"

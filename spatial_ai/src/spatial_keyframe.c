@@ -196,9 +196,9 @@ void apply_ema_to_grid(const SpatialAI* ai, SpatialGrid* grid) {
             float r = 0.5f * (float)grid->R[i] + 0.5f * er;
             float g = 0.5f * (float)grid->G[i] + 0.5f * eg;
             float b = 0.5f * (float)grid->B[i] + 0.5f * eb;
-            if (r > 255.0f) r = 255.0f; if (r < 0.0f) r = 0.0f;
-            if (g > 255.0f) g = 255.0f; if (g < 0.0f) g = 0.0f;
-            if (b > 255.0f) b = 255.0f; if (b < 0.0f) b = 0.0f;
+            if (r > 255.0f) r = 255.0f; else if (r < 0.0f) r = 0.0f;
+            if (g > 255.0f) g = 255.0f; else if (g < 0.0f) g = 0.0f;
+            if (b > 255.0f) b = 255.0f; else if (b < 0.0f) b = 0.0f;
             grid->R[i] = (uint8_t)r;
             grid->G[i] = (uint8_t)g;
             grid->B[i] = (uint8_t)b;

@@ -75,10 +75,34 @@ make              # build engine objects
 make test         # 22 suites: 12 text + 10 image/bimodal
 make demo         # image pipeline visualiser
 make train        # bimodal training CLI (manifest → .spai + .imem)
+make draw         # frame-by-frame image generation CLI
 make chat         # interactive text/image REPL
 make stream       # text streaming trainer
 make gen-tables   # regenerate baked CE delta tables (rare)
 ```
+
+### Windows (PowerShell, MSYS2 + MinGW-w64)
+
+```powershell
+# From the repo root, with mingw32-make + gcc on PATH.
+scripts\windows\build.ps1               # builds engine + all tools
+scripts\windows\test.ps1                # runs every suite
+
+scripts\windows\train.ps1 `
+  -Manifest spatial_ai\data\characters_manifest.tsv `
+  -Name characters                      # → out\models\characters.{spai,imem}
+
+scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -Model  out\models\characters.spai `
+  -SeedKf 0 -Frames 8 -Name kf0         # → out\draw\kf0\final.png (+frames\)
+
+scripts\windows\demo.ps1 `
+  -Image assets\main_hero.png `
+  -Name hero                            # → out\demo\hero_{plain,masked}.png
+```
+
+All outputs land under `out\` (gitignored). See `out\README.md` for the layout.
 
 ### Run bimodal training on the bundled characters
 
@@ -169,6 +193,41 @@ Per-pass stats surface `cells_masked_out`, `brush_bonus_wins`, `unique_deltas_us
 
 ---
 
+## Frame-by-frame drawing — the CLI
+
+`tools/draw.c` drives the engine as a small "video" generator: one drawing pass per frame, the grid rendered and saved after each pass. The last frame is the output. Earlier frames are the progressive stamping — underdrawing → detail.
+
+```bash
+./build/draw \
+    --memory out/models/characters.imem \
+    --model  out/models/characters.spai \
+    --seed-kf 0 \
+    --frames 8 \
+    --out out/draw/kf0
+```
+
+Seeds (most-specific wins):
+
+- `--seed-image <path>` — runs `img_pipeline_run` on the image and starts from the resulting CE grid.
+- `--seed-kf <id>` — copies `Keyframe.ce_snapshot` from the given keyframe in `--model`.
+- no seed — blank CE grid (every cell at the L6 fallback, so output is abstract).
+
+Tunables: `--frames N`, `--top-g N`, `--penalty F` (presence penalty). Output:
+
+```
+out/draw/kf0/
+├── frames/
+│   ├── frame_000.{png,ppm}     state after pass 1
+│   ├── frame_001.{png,ppm}     state after pass 2
+│   ├── ...
+│   └── frame_NNN.{png,ppm}     state after pass N (= last)
+└── final.{png,ppm}             same as the last frame — the result
+```
+
+Empirically, seeding from a learned keyframe jumps `unique_deltas_used` per frame roughly 10× over a blank seed (each cell starts with real tone/role/depth context, so `topg` fallback pulls from L0 rather than L6).
+
+---
+
 ## Multi-scale learn — tier-diverse rules from one image
 
 ```c
@@ -196,6 +255,7 @@ The tier spread is exactly what the cascade was designed to produce. `Drawing_pa
 | `chat`          | REPL with turn-context + query router (`/gen /ret /img /topk`) + session persistence | `tools/chat.c` |
 | `stream_train`  | Line-by-line text ingest with checkpointing, long-line auto-split, auto-threshold calibration | `tools/stream_train.c` |
 | `train`         | Batch image training from a TSV manifest; emits `.spai` + `.imem`; `--resume` supported | `tools/train.c` |
+| `draw`          | Frame-by-frame image generation: N drawing passes → `frames/frame_NNN.{png,ppm}` + `final.{png,ppm}`. Seed from a keyframe, an image, or empty canvas | `tools/draw.c` |
 | `demo_pipeline` | One-shot image → CE → render. `--adapt` for per-image tier thresholds; emits PNG + PPM | `tools/demo_pipeline.c` |
 | `gen_delta_tables` | Offline generator for the baked SoA CE delta tables | `tools/gen_delta_tables.c` |
 | `bench_*`       | Text-engine benchmarks (perplexity, word-predict, QA, STS-B) | `tests/bench_*.c` |
@@ -245,6 +305,9 @@ IMG-CANVAS/
 │   └── characters/               bundled 10-char training set
 ├── docs/
 │   └── benchmarks/v2_text_engine/  wiki5k / wiki20k reports
+├── scripts/
+│   └── windows/                  PowerShell wrappers (build/test/train/draw/demo)
+├── out/                          runtime outputs (gitignored; see out/README.md)
 ├── spatial_ai/
 │   ├── SPEC.md                   text engine spec v3
 │   ├── SPEC-CE.md                image CE engine spec v1
@@ -258,7 +321,7 @@ IMG-CANVAS/
 │   │   └── img_*.h               image CE engine + drawing (10 headers)
 │   ├── src/                      one .c per header + img_delta_tables_data.c (GENERATED)
 │   ├── tests/                    22 unit suites (make test)
-│   ├── tools/                    chat / stream_train / train / demo_pipeline / gen_delta_tables
+│   ├── tools/                    chat / stream_train / train / draw / demo_pipeline / gen_delta_tables
 │   ├── third_party/              stb_image + stb_image_write (public domain)
 │   └── data/
 │       ├── characters_manifest.tsv

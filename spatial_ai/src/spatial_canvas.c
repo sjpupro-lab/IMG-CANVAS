@@ -1,3 +1,11 @@
+/* posix_memalign needs this feature-test macro under glibc; MinGW
+ * uses the _WIN32 branch in cv_aligned() and ignores it. */
+#ifndef _WIN32
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200112L
+#  endif
+#endif
+
 #include "spatial_canvas.h"
 #include "spatial_layers.h"
 #include "spatial_match.h"
@@ -65,7 +73,7 @@ static void cv_aligned_free(void* p) { _aligned_free(p); }
 #else
 static void* cv_aligned(size_t alignment, size_t size) {
     void* p = NULL;
-    posix_memalign(&p, alignment, size);
+    if (posix_memalign(&p, alignment, size) != 0) return NULL;
     return p;
 }
 static void cv_aligned_free(void* p) { free(p); }

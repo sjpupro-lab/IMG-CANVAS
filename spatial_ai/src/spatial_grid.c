@@ -1,3 +1,11 @@
+/* posix_memalign needs this feature-test macro under glibc; MinGW
+ * uses the _WIN32 branch below and ignores it. */
+#ifndef _WIN32
+#  ifndef _POSIX_C_SOURCE
+#    define _POSIX_C_SOURCE 200112L
+#  endif
+#endif
+
 #include "spatial_grid.h"
 
 #ifdef _WIN32
@@ -11,7 +19,7 @@ static void aligned_free_portable(void* ptr) {
 #else
 static void* aligned_alloc_portable(size_t alignment, size_t size) {
     void* ptr = NULL;
-    posix_memalign(&ptr, alignment, size);
+    if (posix_memalign(&ptr, alignment, size) != 0) return NULL;
     return ptr;
 }
 static void aligned_free_portable(void* ptr) {

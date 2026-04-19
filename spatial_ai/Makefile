@@ -9,6 +9,21 @@ TOOLS_DIR       = tools
 THIRD_PARTY_DIR = third_party
 BUILD_DIR       = build
 
+# ─── Host-portable shell helpers ─────────────────────────
+# mingw32-make under PowerShell defaults to cmd.exe, which doesn't
+# know `mkdir -p`, `rm -rf`, or sh-style `for/do/done`. Pick a shell
+# and command shapes per host so the same Makefile runs under both
+# POSIX sh and cmd.exe.
+ifeq ($(OS),Windows_NT)
+    MKDIR_BUILD = if not exist $(BUILD_DIR) mkdir $(BUILD_DIR)
+    RMRF_BUILD  = if exist $(BUILD_DIR) rmdir /s /q $(BUILD_DIR)
+    EXE         = .exe
+else
+    MKDIR_BUILD = mkdir -p $(BUILD_DIR)
+    RMRF_BUILD  = rm -rf $(BUILD_DIR)
+    EXE         =
+endif
+
 # ─── Engine sources ──────────────────────────────────────
 # Text-side (v8 "완성본"): adds spatial_clock alongside the
 # existing stack. Image-side (img-canvas): self-contained CE
@@ -54,20 +69,26 @@ all: $(BUILD_DIR) $(OBJS)
 	@echo "Build complete."
 
 $(BUILD_DIR):
-	mkdir -p $(BUILD_DIR)
+	$(MKDIR_BUILD)
 
 $(BUILD_DIR)/%.o: $(SRC_DIR)/%.c | $(BUILD_DIR)
 	$(CC) $(CFLAGS) -c $< -o $@
 
 # ─── Tests ───────────────────────────────────────────────
-test: $(addprefix $(BUILD_DIR)/,$(TESTS))
-	@echo "=== Running all tests ==="
-	@for t in $(TESTS); do \
-		echo "--- $$t ---"; \
-		./$(BUILD_DIR)/$$t || exit 1; \
-		echo ""; \
-	done
-	@echo "=== ALL TESTS PASSED ==="
+# Each suite becomes a `run-<name>` phony that runs the built binary.
+# The `test` target depends on every `run-<name>`, so make orchestrates
+# sequencing with no shell loop — works identically under /bin/sh and
+# cmd.exe.
+RUN_TESTS = $(addprefix run-,$(TESTS))
+
+.PHONY: $(RUN_TESTS)
+
+$(RUN_TESTS): run-%: $(BUILD_DIR)/%
+	@echo --- $* ---
+	@$<
+
+test: $(addprefix $(BUILD_DIR)/,$(TESTS)) $(RUN_TESTS)
+	@echo === ALL TESTS PASSED ===
 
 # Text-engine tests
 $(BUILD_DIR)/test_grid:        $(TEST_DIR)/test_grid.c        $(OBJS) | $(BUILD_DIR)
@@ -205,6 +226,19 @@ train: $(BUILD_DIR)/train
 	@echo "Built train. Usage:"
 	@echo "  ./build/train [--resume] [--model foo.spai] [--memory foo.imem] manifest.tsv"
 
+# ─── Frame-by-frame drawing CLI (.imem + optional seed → PNG frames) ──
+$(BUILD_DIR)/draw: $(TOOLS_DIR)/draw.c $(OBJS) \
+                   $(BUILD_DIR)/stb_image_impl.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(THIRD_PARTY_DIR) $< $(OBJS) \
+	      $(BUILD_DIR)/stb_image_impl.o -o $@ $(LDFLAGS)
+
+draw: $(BUILD_DIR)/draw
+	@echo "Built draw. Usage:"
+	@echo "  ./build/draw --memory out/models/out.imem --out out/draw"
+	@echo "               [--seed-image path | --seed-kf ID --model file.spai]"
+	@echo "               [--frames N] [--top-g N] [--penalty F]"
+	@echo "  Writes out/draw/frames/frame_NNN.{png,ppm} + out/draw/final.{png,ppm}."
+
 # ─── Aggregate bench runner ──────────────────────────────────
 bench: $(BUILD_DIR)/bench_stsb $(BUILD_DIR)/bench_perplexity \
        $(BUILD_DIR)/bench_word_predict $(BUILD_DIR)/bench_qa
@@ -243,4 +277,4 @@ bench: $(BUILD_DIR)/bench_stsb $(BUILD_DIR)/bench_perplexity \
 	fi
 
 clean:
-	rm -rf $(BUILD_DIR)
+	$(RMRF_BUILD)
