@@ -205,6 +205,19 @@ train: $(BUILD_DIR)/train
 	@echo "Built train. Usage:"
 	@echo "  ./build/train [--resume] [--model foo.spai] [--memory foo.imem] manifest.tsv"
 
+# ─── Frame-by-frame drawing CLI (.imem + optional seed → PNG frames) ──
+$(BUILD_DIR)/draw: $(TOOLS_DIR)/draw.c $(OBJS) \
+                   $(BUILD_DIR)/stb_image_impl.o | $(BUILD_DIR)
+	$(CC) $(CFLAGS) -I$(THIRD_PARTY_DIR) $< $(OBJS) \
+	      $(BUILD_DIR)/stb_image_impl.o -o $@ $(LDFLAGS)
+
+draw: $(BUILD_DIR)/draw
+	@echo "Built draw. Usage:"
+	@echo "  ./build/draw --memory out/models/out.imem --out out/draw"
+	@echo "               [--seed-image path | --seed-kf ID --model file.spai]"
+	@echo "               [--frames N] [--top-g N] [--penalty F]"
+	@echo "  Writes out/draw/frames/frame_NNN.{png,ppm} + out/draw/final.{png,ppm}."
+
 # ─── Aggregate bench runner ──────────────────────────────────
 bench: $(BUILD_DIR)/bench_stsb $(BUILD_DIR)/bench_perplexity \
        $(BUILD_DIR)/bench_word_predict $(BUILD_DIR)/bench_qa

@@ -27,3 +27,10 @@ spatial_ai/data/squad*.json
 
 # User-local training data (licensing varies — keep out of the repo)
 spatial_ai/data/training/
+
+# Runtime output space (models / frames / demo renders). See out/README.md.
+# Everything under out/ (at any depth) is gitignored except root-level README.
+**/out/
+!/out/
+/out/*
+!/out/README.md

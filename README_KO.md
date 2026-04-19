@@ -77,10 +77,34 @@ make              # 엔진 오브젝트 빌드
 make test         # 22 suites (텍스트 12 + 이미지/양모달 10)
 make demo         # 이미지 파이프라인 시각화
 make train        # 양모달 배치 학습 (매니페스트 → .spai + .imem)
+make draw         # 프레임 단위 이미지 생성 CLI
 make chat         # 대화형 텍스트/이미지 REPL
 make stream       # 텍스트 스트리밍 학습기
 make gen-tables   # 구운 CE delta 테이블 재생성 (드묾)
 ```
+
+### Windows (PowerShell, MSYS2 + MinGW-w64)
+
+```powershell
+# repo 루트에서, PATH에 mingw32-make + gcc가 잡힌 상태로.
+scripts\windows\build.ps1               # 엔진 + 모든 도구 빌드
+scripts\windows\test.ps1                # 전체 suite 실행
+
+scripts\windows\train.ps1 `
+  -Manifest spatial_ai\data\characters_manifest.tsv `
+  -Name characters                      # → out\models\characters.{spai,imem}
+
+scripts\windows\draw.ps1 `
+  -Memory out\models\characters.imem `
+  -Model  out\models\characters.spai `
+  -SeedKf 0 -Frames 8 -Name kf0         # → out\draw\kf0\final.png (+frames\)
+
+scripts\windows\demo.ps1 `
+  -Image assets\main_hero.png `
+  -Name hero                            # → out\demo\hero_{plain,masked}.png
+```
+
+모든 출력물은 `out\` 아래로 떨어짐 (gitignore됨). 구조는 `out\README.md` 참조.
 
 ### 번들 캐릭터로 양모달 학습
 
@@ -171,6 +195,41 @@ img_drawing_pass(grid, memory, &opt, &clothes_stats);
 
 ---
 
+## 프레임 단위 드로잉 — CLI
+
+`tools/draw.c`는 엔진을 작은 "비디오" 생성기로 돌림: **프레임당 drawing pass 1회**, 각 패스 후에 격자를 렌더·저장. 마지막 프레임이 결과물. 이전 프레임들은 점진적 스탬핑 과정 — 밑그림 → 디테일.
+
+```bash
+./build/draw \
+    --memory out/models/characters.imem \
+    --model  out/models/characters.spai \
+    --seed-kf 0 \
+    --frames 8 \
+    --out out/draw/kf0
+```
+
+Seed (가장 구체적인 걸로 덮어쓰기):
+
+- `--seed-image <path>` — 이미지에 `img_pipeline_run` 돌린 결과 CE 격자에서 시작.
+- `--seed-kf <id>` — `--model`의 해당 keyframe의 `ce_snapshot`을 복사.
+- seed 없음 — 빈 CE 격자 (모든 셀 L6 fallback, 결과는 추상).
+
+튜너블: `--frames N`, `--top-g N`, `--penalty F` (presence penalty). 출력:
+
+```
+out/draw/kf0/
+├── frames/
+│   ├── frame_000.{png,ppm}     pass 1 직후 상태
+│   ├── frame_001.{png,ppm}     pass 2 직후 상태
+│   ├── ...
+│   └── frame_NNN.{png,ppm}     pass N (= 마지막) 직후 상태
+└── final.{png,ppm}             마지막 프레임과 동일 — 결과물
+```
+
+경험적으로 학습된 keyframe으로 seed하면 프레임당 `unique_deltas_used`가 빈 seed 대비 약 10× (각 셀이 실제 tone/role/depth 컨텍스트로 시작하니 `topg` fallback이 L6가 아닌 L0에서 뽑힘).
+
+---
+
 ## 멀티스케일 학습 — 한 장에서 tier-다양 규칙
 
 ```c
@@ -198,6 +257,7 @@ Tier 스프레드는 캐스케이드 설계 그대로. 이 메모리로 빈 캔�
 | `chat`          | 턴 컨텍스트 + 쿼리 라우터 (`/gen /ret /img /topk`) + 세션 영속화 REPL | `tools/chat.c` |
 | `stream_train`  | 라인별 텍스트 인제스트 + 체크포인트 + 긴 라인 자동 분할 + auto-threshold 캘리브 | `tools/stream_train.c` |
 | `train`         | TSV 매니페스트 → `.spai` + `.imem` 배치 학습; `--resume` 지원 | `tools/train.c` |
+| `draw`          | 프레임 단위 이미지 생성: N 패스 → `frames/frame_NNN.{png,ppm}` + `final.{png,ppm}`. seed는 keyframe / 이미지 / 빈 캔버스 중 택 | `tools/draw.c` |
 | `demo_pipeline` | 이미지 → CE → 렌더 원샷. `--adapt`로 이미지별 tier 임계값; PNG + PPM 출력 | `tools/demo_pipeline.c` |
 | `gen_delta_tables` | CE delta 테이블 오프라인 생성기 | `tools/gen_delta_tables.c` |
 | `bench_*`       | 텍스트 엔진 벤치마크 (perplexity, word-predict, QA, STS-B) | `tests/bench_*.c` |
@@ -247,6 +307,9 @@ IMG-CANVAS/
 │   └── characters/               10장 번들 캐릭터
 ├── docs/
 │   └── benchmarks/v2_text_engine/  wiki5k / wiki20k 리포트
+├── scripts/
+│   └── windows/                  PowerShell 래퍼 (build/test/train/draw/demo)
+├── out/                          런타임 출력 (gitignore; out/README.md 참조)
 ├── spatial_ai/
 │   ├── SPEC.md                   텍스트 엔진 명세 v3
 │   ├── SPEC-CE.md                이미지 CE 엔진 명세 v1
