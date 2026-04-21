@@ -354,6 +354,7 @@ All green on every commit.
 
 - **Text** — `docs/benchmarks/v2_text_engine/` — reference wiki5k and wiki20k runs with matching / self-recall / word-prediction / byte-perplexity / generation numbers under the v2 engine (commit `4c4e108`).
 - **Image** — bimodal `./build/train` on the bundled character manifest reproduces `+7 633 deltas / 10 kf / 10 ce snapshots / 13 + 13 rare-bucket hits`. Multi-scale learn on a 1280 × 720 subject produces `+2 560 deltas` with tier spread `T1 814 · T2 1 425 · T3 321`.
+- **Image (sample-extended practical run)** — added 4 sample-based training images and reran train/draw; report: `docs/benchmarks/image_training/characters_samples_extension_2026-04-21.md`.
 
 ---
 

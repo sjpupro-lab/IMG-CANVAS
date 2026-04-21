@@ -356,6 +356,7 @@ cd spatial_ai && make test
 
 - **텍스트** — `docs/benchmarks/v2_text_engine/` — wiki5k / wiki20k 레퍼런스 실행 결과 (matching / self-recall / word-predict / byte-perplexity / generation). v2 엔진 (commit `4c4e108`).
 - **이미지** — 번들 캐릭터 매니페스트 양모달 학습 → `+7 633 deltas / 10 kf / 10 ce snapshots / 13 + 13 rare-bucket`. 1280 × 720 인물 멀티스케일 학습 → `+2 560 deltas`, 스프레드 `T1 814 · T2 1 425 · T3 321`.
+- **이미지 (샘플 확장 실전 실행)** — 샘플 기반 훈련 이미지를 4장 추가한 뒤 train/draw를 재실행한 결과 리포트: `docs/benchmarks/image_training/characters_samples_extension_2026-04-21.md`.
 
 ---
 
