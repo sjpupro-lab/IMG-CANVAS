@@ -53,6 +53,7 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/img_drawing.c \
        $(SRC_DIR)/img_region.c \
        $(SRC_DIR)/img_level.c \
+       $(SRC_DIR)/img_subtract.c \
        $(SRC_DIR)/img_noise_memory.c \
        $(SRC_DIR)/spatial_bimodal.c
 
@@ -64,7 +65,7 @@ TESTS = test_grid test_morpheme test_layers test_match test_keyframe \
         test_img_ce test_img_delta_memory test_img_set16 test_img_render \
         test_img_pipeline test_img_tier_table test_img_delta_learn \
         test_img_ce_diff test_img_drawing test_img_noise_memory test_bimodal \
-        test_img_region test_backcompat test_img_level
+        test_img_region test_backcompat test_img_level test_img_subtract
 
 .PHONY: all clean test gpu_train_help demo train gen-tables wiki bench \
         bench_word bench_qa chat stream
@@ -150,6 +151,8 @@ $(BUILD_DIR)/test_img_region:       $(TEST_DIR)/test_img_region.c       $(OBJS) 
 $(BUILD_DIR)/test_backcompat:       $(TEST_DIR)/test_backcompat.c       $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 $(BUILD_DIR)/test_img_level:        $(TEST_DIR)/test_img_level.c        $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+$(BUILD_DIR)/test_img_subtract:     $(TEST_DIR)/test_img_subtract.c     $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── Wikipedia integration test (manual run) ─────────────────
