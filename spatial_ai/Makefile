@@ -51,6 +51,7 @@ SRCS = $(SRC_DIR)/spatial_grid.c \
        $(SRC_DIR)/img_delta_learn.c \
        $(SRC_DIR)/img_ce_diff.c \
        $(SRC_DIR)/img_drawing.c \
+       $(SRC_DIR)/img_region.c \
        $(SRC_DIR)/img_noise_memory.c \
        $(SRC_DIR)/spatial_bimodal.c
 
@@ -61,7 +62,8 @@ TESTS = test_grid test_morpheme test_layers test_match test_keyframe \
         test_adaptive test_subtitle \
         test_img_ce test_img_delta_memory test_img_set16 test_img_render \
         test_img_pipeline test_img_tier_table test_img_delta_learn \
-        test_img_ce_diff test_img_drawing test_img_noise_memory test_bimodal
+        test_img_ce_diff test_img_drawing test_img_noise_memory test_bimodal \
+        test_img_region test_backcompat
 
 .PHONY: all clean test gpu_train_help demo train gen-tables wiki bench \
         bench_word bench_qa chat stream
@@ -139,6 +141,12 @@ $(BUILD_DIR)/test_img_drawing:      $(TEST_DIR)/test_img_drawing.c      $(OBJS) 
 $(BUILD_DIR)/test_img_noise_memory: $(TEST_DIR)/test_img_noise_memory.c $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 $(BUILD_DIR)/test_bimodal:          $(TEST_DIR)/test_bimodal.c          $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+
+# V2 refactor tests — region grouping + reference hash back-compat.
+$(BUILD_DIR)/test_img_region:       $(TEST_DIR)/test_img_region.c       $(OBJS) | $(BUILD_DIR)
+	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
+$(BUILD_DIR)/test_backcompat:       $(TEST_DIR)/test_backcompat.c       $(OBJS) | $(BUILD_DIR)
 	$(CC) $(CFLAGS) $< $(OBJS) -o $@ $(LDFLAGS)
 
 # ─── Wikipedia integration test (manual run) ─────────────────
