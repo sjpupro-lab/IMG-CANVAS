@@ -1,4 +1,5 @@
 #include "img_drawing.h"
+#include "img_noise_memory.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -144,3 +145,21 @@ int img_drawing_pass(ImgCEGrid* grid,
     if (out_stats) *out_stats = local;
     return 1;
 }
+
+int img_drawing_pass_with_prior(ImgCEGrid*                          grid,
+                                ImgDeltaMemory*                     memory,
+                                const struct ImgNoiseMemory*        noise_memory,
+                                const struct ImgNoiseSampleOptions* noise_opts,
+                                const ImgDrawingOptions*            draw_opts,
+                                ImgDrawingStats*                    out_stats) {
+    if (noise_memory && noise_opts) {
+        if (!img_noise_memory_sample_grid(
+                (const ImgNoiseMemory*)noise_memory,
+                grid,
+                (const ImgNoiseSampleOptions*)noise_opts)) {
+            return 0;
+        }
+    }
+    return img_drawing_pass(grid, memory, draw_opts, out_stats);
+}
+

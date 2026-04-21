@@ -30,6 +30,7 @@
 #include "img_delta_memory.h"
 #include "img_delta_learn.h"
 #include "img_drawing.h"
+#include "img_noise_memory.h"
 #include "img_render.h"
 #include "img_pipeline.h"
 #include "img_ce.h"
@@ -108,6 +109,9 @@ typedef struct {
     uint32_t    frames;
     uint32_t    top_g;
     double      penalty;
+    const char* nmem_path;
+    uint64_t    nmem_seed;
+    double      nmem_temperature;
 } Args;
 
 static void usage(const char* prog) {
@@ -123,6 +127,12 @@ static void usage(const char* prog) {
         "  --frames <N>         number of drawing passes (default 8)\n"
         "  --top-g <N>          top-G candidate pool (default 4)\n"
         "  --penalty <α>        presence penalty (default 0.5)\n"
+        "  --noise <path>       NoiseMemory file — seeds every frame\n"
+        "                       from a learned spatial prior instead\n"
+        "                       of an empty grid (applied only to the\n"
+        "                       first frame when no other seed is set)\n"
+        "  --noise-seed <u64>   PRNG seed for --noise sampling\n"
+        "  --noise-temperature <F>  0=greedy, 1=nominal, >1=flatter\n"
         "\n"
         "Output: <out>/frames/frame_NNN.{png,ppm} per pass,\n"
         "         <out>/final.{png,ppm} — the last frame (the result).\n",
@@ -138,6 +148,9 @@ static int parse_args(int argc, char** argv, Args* a) {
     a->frames      = 8;
     a->top_g       = 4;
     a->penalty     = 0.5;
+    a->nmem_path   = NULL;
+    a->nmem_seed   = 0;
+    a->nmem_temperature = 1.0;
     for (int i = 1; i < argc; i++) {
         const char* k = argv[i];
         if      (strcmp(k, "--memory")     == 0 && i + 1 < argc) a->memory_path = argv[++i];
@@ -148,6 +161,9 @@ static int parse_args(int argc, char** argv, Args* a) {
         else if (strcmp(k, "--frames")     == 0 && i + 1 < argc) a->frames      = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (strcmp(k, "--top-g")      == 0 && i + 1 < argc) a->top_g       = (uint32_t)strtoul(argv[++i], NULL, 10);
         else if (strcmp(k, "--penalty")    == 0 && i + 1 < argc) a->penalty     = strtod(argv[++i], NULL);
+        else if (strcmp(k, "--noise")      == 0 && i + 1 < argc) a->nmem_path   = argv[++i];
+        else if (strcmp(k, "--noise-seed") == 0 && i + 1 < argc) a->nmem_seed   = strtoull(argv[++i], NULL, 10);
+        else if (strcmp(k, "--noise-temperature") == 0 && i + 1 < argc) a->nmem_temperature = strtod(argv[++i], NULL);
         else if (strcmp(k, "-h")           == 0 || strcmp(k, "--help") == 0) {
             usage(argv[0]); return 0;
         } else {
@@ -242,6 +258,40 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[draw] seeded from empty grid\n");
     }
 
+    /* Optional: learned spatial prior. Loaded into a local NMEM and
+     * sampled into the grid once, before the drawing loop starts.
+     * This replaces "empty canvas → abstract pattern" with a stamp
+     * over a learned-what-usually-lives-here layout. */
+    ImgNoiseMemory nmem;
+    int nmem_ready = 0;
+    if (args.nmem_path) {
+        if (!img_noise_memory_init(&nmem)) {
+            fprintf(stderr, "[draw] nmem init failed\n");
+        } else if (!img_noise_memory_load(&nmem, args.nmem_path)) {
+            fprintf(stderr, "[draw] nmem load failed: %s\n", args.nmem_path);
+            img_noise_memory_free(&nmem);
+        } else {
+            nmem_ready = 1;
+            ImgNoiseSampleOptions nopt = img_noise_sample_default_options();
+            nopt.seed = args.nmem_seed;
+            if (args.nmem_temperature >= 0.0) {
+                double t = args.nmem_temperature * 256.0;
+                if      (t < 0.0)       t = 0.0;
+                else if (t > 65535.0)   t = 65535.0;
+                nopt.temperature_q8 = (uint32_t)(t + 0.5);
+            }
+            if (img_noise_memory_sample_grid(&nmem, grid, &nopt)) {
+                fprintf(stderr,
+                        "[draw] prior: sampled grid from %s (seed=%llu t=%.3f)\n",
+                        args.nmem_path,
+                        (unsigned long long)args.nmem_seed,
+                        args.nmem_temperature);
+            } else {
+                fprintf(stderr, "[draw] prior sample failed\n");
+            }
+        }
+    }
+
     /* Prepare output directory. */
     char frames_dir[2048];
     if (!ensure_dir(args.out_dir) ||
@@ -307,5 +357,6 @@ int main(int argc, char** argv) {
 
     img_ce_grid_destroy(grid);
     img_delta_memory_destroy(mem);
+    if (nmem_ready) img_noise_memory_free(&nmem);
     return 0;
 }
