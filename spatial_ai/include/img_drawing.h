@@ -4,6 +4,12 @@
 #include "img_ce.h"
 #include "img_delta_memory.h"
 
+/* Forward declarations so drawing callers can opt into a learned
+ * prior without forcing a compile-time dependency on the noise
+ * memory module. Full definitions live in img_noise_memory.h. */
+struct ImgNoiseMemory;
+struct ImgNoiseSampleOptions;
+
 /*
  * img_drawing — "print-the-image" operating mode.
  *
@@ -99,6 +105,20 @@ int img_drawing_pass(ImgCEGrid* grid,
                      ImgDeltaMemory* memory,
                      const ImgDrawingOptions* opts_or_null,
                      ImgDrawingStats* out_stats_or_null);
+
+/* Wrapper: optionally sample a learned prior into `grid` first, then
+ * run the standard drawing pass. If either `noise_memory` or
+ * `noise_opts` is NULL the prior step is skipped and behaviour is
+ * bit-identical to img_drawing_pass(grid, memory, draw_opts, ...).
+ *
+ * Returns 1 on success (including the no-op path), 0 if the prior
+ * sampling step reported a failure. */
+int img_drawing_pass_with_prior(ImgCEGrid*                          grid,
+                                ImgDeltaMemory*                     memory,
+                                const struct ImgNoiseMemory*        noise_memory,
+                                const struct ImgNoiseSampleOptions* noise_opts,
+                                const ImgDrawingOptions*            draw_opts,
+                                ImgDrawingStats*                    out_stats);
 
 /* Convenience: fill `mask` (size IMG_CE_TOTAL) with 1s inside the
  * rectangle [x0, x1) × [y0, y1) and 0s elsewhere. Bounds are

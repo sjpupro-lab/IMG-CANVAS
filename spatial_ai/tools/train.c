@@ -28,6 +28,7 @@
 
 #include "img_delta_learn.h"
 #include "img_delta_memory.h"
+#include "img_noise_memory.h"
 #include "spatial_bimodal.h"
 #include "spatial_io.h"
 #include "spatial_keyframe.h"
@@ -141,6 +142,7 @@ static int parse_line(char* line, ManifestRow* out) {
 typedef struct {
     const char* model_path;
     const char* memory_path;
+    const char* nmem_path;
     const char* manifest_path;
     int quiet;
     int resume;
@@ -152,6 +154,8 @@ static void print_usage(const char* prog) {
         "\n"
         "  --model <path>    output SpatialAI file (default out.spai)\n"
         "  --memory <path>   output DeltaMemory file (default out.imem)\n"
+        "  --nmem <path>     output NoiseMemory file (optional; learned\n"
+        "                    spatial prior for deterministic drawing seed)\n"
         "  --resume          load existing outputs and keep accumulating\n"
         "  --quiet           suppress per-row progress\n"
         "\n"
@@ -162,6 +166,7 @@ static void print_usage(const char* prog) {
 static int parse_args(int argc, char** argv, Args* out) {
     out->model_path   = "out.spai";
     out->memory_path  = "out.imem";
+    out->nmem_path    = NULL;
     out->manifest_path = NULL;
     out->quiet = 0;
     out->resume = 0;
@@ -171,6 +176,8 @@ static int parse_args(int argc, char** argv, Args* out) {
             out->model_path = argv[++i];
         } else if (strcmp(a, "--memory") == 0 && i + 1 < argc) {
             out->memory_path = argv[++i];
+        } else if (strcmp(a, "--nmem") == 0 && i + 1 < argc) {
+            out->nmem_path = argv[++i];
         } else if (strcmp(a, "--quiet") == 0) {
             out->quiet = 1;
         } else if (strcmp(a, "--resume") == 0) {
@@ -194,6 +201,8 @@ int main(int argc, char** argv) {
     /* Load or create outputs. */
     SpatialAI* ai = NULL;
     ImgDeltaMemory* mem = NULL;
+    ImgNoiseMemory nmem;
+    int nmem_ready = 0;
 
     if (args.resume) {
         SpaiStatus ss = SPAI_OK;
@@ -217,6 +226,20 @@ int main(int argc, char** argv) {
         if (ai)  spatial_ai_destroy(ai);
         if (mem) img_delta_memory_destroy(mem);
         return 1;
+    }
+
+    if (args.nmem_path) {
+        if (!img_noise_memory_init(&nmem)) {
+            fprintf(stderr, "nmem init failed\n");
+            spatial_ai_destroy(ai); img_delta_memory_destroy(mem);
+            return 1;
+        }
+        nmem_ready = 1;
+        if (args.resume) {
+            if (img_noise_memory_load(&nmem, args.nmem_path)) {
+                printf("  [resume] loaded nmem %s\n", args.nmem_path);
+            }
+        }
     }
 
     /* Walk the manifest. */
@@ -253,9 +276,25 @@ int main(int argc, char** argv) {
         uint32_t kf = ai_force_keyframe(ai, row.label, row.label);
         int bound = ai_bind_image_to_kf(ai, kf, after, aw, ah, mem);
 
+        /* Fold the freshly-bound CE snapshot into the noise memory,
+         * which captures "what usually lives where" so drawing from
+         * an empty canvas starts from a learned spatial prior instead
+         * of a flat fallback context. */
+        int nmem_observed = 0;
+        if (nmem_ready && bound) {
+            const ImgCEGrid* snap = ai_get_ce_snapshot(ai, kf);
+            if (snap) {
+                if (img_noise_memory_observe(&nmem, snap, row.label)) {
+                    nmem_observed = 1;
+                }
+            }
+        }
+
         if (!args.quiet) {
-            printf("  [%u] %-40.40s  +%4u deltas  kf=%u  ce=%s\n",
-                   rows_total, row.label, added, kf, bound ? "yes" : "no");
+            printf("  [%u] %-40.40s  +%4u deltas  kf=%u  ce=%s  nmem=%s\n",
+                   rows_total, row.label, added, kf,
+                   bound ? "yes" : "no",
+                   nmem_ready ? (nmem_observed ? "yes" : "no") : "off");
         }
 
         free(before);
@@ -274,6 +313,11 @@ int main(int argc, char** argv) {
     if (ms != IMEM_OK) {
         fprintf(stderr, "memory save failed: %s\n",
                 img_delta_memory_status_str(ms));
+    }
+    if (nmem_ready) {
+        if (!img_noise_memory_save(&nmem, args.nmem_path)) {
+            fprintf(stderr, "nmem save failed: %s\n", args.nmem_path);
+        }
     }
 
     /* Summary. */
@@ -303,8 +347,13 @@ int main(int argc, char** argv) {
     printf("  ce snapshots:     %u\n", ai_ce_snapshot_count(ai));
     printf("  model:            %s\n", args.model_path);
     printf("  memory:           %s\n", args.memory_path);
+    if (nmem_ready) {
+        printf("  nmem:             %s  (observations=%u)\n",
+               args.nmem_path, nmem.observe_count);
+    }
 
     spatial_ai_destroy(ai);
     img_delta_memory_destroy(mem);
+    if (nmem_ready) img_noise_memory_free(&nmem);
     return 0;
 }
