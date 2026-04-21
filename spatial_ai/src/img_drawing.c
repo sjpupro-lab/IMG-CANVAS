@@ -1,8 +1,19 @@
 #include "img_drawing.h"
 #include "img_noise_memory.h"
+#include "img_region.h"
 
 #include <stdlib.h>
 #include <string.h>
+
+/* ── V2 Phase A ──────────────────────────────────────────────
+ * Drawing consults an A-band region map built from the grid at
+ * the start of each pass. Phase A keeps the raster-order stamp
+ * loop untouched so reference hashes stay bit-identical; the
+ * region map is computed but used only for stats / future phases.
+ * Phase B adds level-aware scheduling on top; Phase C rewrites
+ * the per-stamp update in terms of subtractions. */
+
+#define IMG_REGION_A_BAND_WIDTH_DEFAULT  16
 
 ImgDrawingOptions img_drawing_default_options(void) {
     ImgDrawingOptions o;
@@ -69,6 +80,17 @@ int img_drawing_pass(ImgCEGrid* grid,
     const uint32_t n_cells = grid->width * grid->height;
     const int brush_active = (opt.target_tier != 0) ||
                              (opt.target_role != 0);
+
+    /* Phase A: compute the A-band region map once per drawing call.
+     * Phase A does not alter stamp order or selection, so reference
+     * hashes stay bit-identical; the map is kept for Phase B/C to
+     * consult and is torn down at the end of the pass. A failure
+     * here is non-fatal — we simply fall back to the classic loop. */
+    ImgRegionMap rmap;
+    int have_rmap = img_region_map_extract(
+                        grid,
+                        IMG_REGION_A_BAND_WIDTH_DEFAULT,
+                        &rmap);
 
     for (uint32_t pass = 0; pass < opt.passes; pass++) {
         for (uint32_t i = 0; i < n_cells; i++) {
@@ -141,6 +163,7 @@ int img_drawing_pass(ImgCEGrid* grid,
 
     free(recent_counts);
     free(picked_any);
+    if (have_rmap) img_region_map_free(&rmap);
 
     if (out_stats) *out_stats = local;
     return 1;

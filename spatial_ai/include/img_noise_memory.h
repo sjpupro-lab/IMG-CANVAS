@@ -30,9 +30,10 @@
  *       the wrapper in img_drawing skips the prior step entirely.
  */
 
-#define IMG_NOISE_TOPK     8
-#define IMG_NOISE_MAGIC    "NMEM"
-#define IMG_NOISE_VERSION  1u
+#define IMG_NOISE_TOPK        8
+#define IMG_NOISE_MAGIC       "NMEM"
+#define IMG_NOISE_VERSION     1u       /* default save format (v1)       */
+#define IMG_NOISE_VERSION_V2  2u       /* opt-in: level bits in tag MSBs */
 
 /* Number of 8-direction buckets and delta-sign buckets that fit in
  * the `direction` byte (3 bits + 2 bits + 3 bits reserved). */
@@ -133,10 +134,21 @@ int img_noise_memory_sample_grid(const ImgNoiseMemory*         nmem,
  * Returns 1 on success. */
 int  img_noise_memory_save(const ImgNoiseMemory* nmem, const char* path);
 
+/* Save with an explicit format version. Accepts IMG_NOISE_VERSION
+ * (v1, default) or IMG_NOISE_VERSION_V2 (v2, level bits preserved
+ * in the tags MSBs). On-disk sample bytes are identical across v1
+ * and v2 — v1 samples always have the MSBs zeroed; v2 samples may
+ * carry a 2-bit level code there. Only the header `version` field
+ * differs. Returns 1 on success. */
+int  img_noise_memory_save_versioned(const ImgNoiseMemory* nmem,
+                                     const char* path,
+                                     uint16_t version);
+
 /* Load `nmem` (must be zero-init or freshly _init'd) from `path`.
- * Returns 1 on success, 0 on any error (open / magic / version /
- * short read). On failure `nmem` is left in an _init'd empty state
- * if it was one; callers should treat it as a soft failure. */
+ * Accepts v1 and v2 headers; returns 1 on success, 0 on any error
+ * (open / magic / version / short read). On failure `nmem` is left
+ * in an _init'd empty state if it was one; callers should treat it
+ * as a soft failure. */
 int  img_noise_memory_load(ImgNoiseMemory* nmem, const char* path);
 
 /* ── helpers / FNV-1a 64 ──────────────────────────────────── */

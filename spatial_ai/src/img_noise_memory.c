@@ -1,5 +1,6 @@
 #include "img_noise_memory.h"
 #include "img_delta_memory.h"   /* for IMG_TIER_T1..T3 enum values */
+#include "img_level.h"          /* IMG_LEVEL_TAG0_BIT / TAG1_BIT       */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -130,16 +131,22 @@ static void ns_write_sample_to_cell(ImgCECell* cell, const ImgNoiseSample* s) {
 }
 
 /* Byte-level hamming-ish distance over (RGBA + tags0 + tags1 + direction).
- * weight is ignored. */
+ * weight is ignored. Level bits (top bit of tags0/tags1, V2 only) are
+ * masked off so a V2 sample compares identically to its V1 twin —
+ * level is a metadata side-channel, not a discriminator. In V1 files
+ * those bits are always zero so the mask is a no-op. */
 static uint32_t ns_sample_distance(const ImgNoiseSample* a,
                                    const ImgNoiseSample* b) {
+    const uint8_t LVL_MASK = IMG_LEVEL_TAG0_BIT;   /* == IMG_LEVEL_TAG1_BIT */
     uint32_t d = 0;
     if (a->ce_r      != b->ce_r)      d++;
     if (a->ce_g      != b->ce_g)      d++;
     if (a->ce_b      != b->ce_b)      d++;
     if (a->ce_a      != b->ce_a)      d++;
-    if (a->tags0     != b->tags0)     d++;
-    if (a->tags1     != b->tags1)     d++;
+    if ((a->tags0 & (uint8_t)~LVL_MASK) !=
+        (b->tags0 & (uint8_t)~LVL_MASK)) d++;
+    if ((a->tags1 & (uint8_t)~LVL_MASK) !=
+        (b->tags1 & (uint8_t)~LVL_MASK)) d++;
     if (a->direction != b->direction) d++;
     return d;
 }
@@ -562,7 +569,15 @@ static int ns_read_profile(FILE* fp, ImgNoiseCellProfile* p) {
 #define NS_CELL_BYTES        (uint32_t)(IMG_CE_TOTAL * sizeof(ImgNoiseCellProfile))
 
 int img_noise_memory_save(const ImgNoiseMemory* nmem, const char* path) {
+    return img_noise_memory_save_versioned(nmem, path, IMG_NOISE_VERSION);
+}
+
+int img_noise_memory_save_versioned(const ImgNoiseMemory* nmem,
+                                    const char* path,
+                                    uint16_t version) {
     if (!nmem || !path) return 0;
+    if (version != IMG_NOISE_VERSION &&
+        version != IMG_NOISE_VERSION_V2) return 0;
     FILE* fp = fopen(path, "wb");
     if (!fp) return 0;
 
@@ -576,7 +591,7 @@ int img_noise_memory_save(const ImgNoiseMemory* nmem, const char* path) {
     if (nmem->label_count) flags |= 0x1u;
 
     if (fwrite(IMG_NOISE_MAGIC, 1, 4, fp) != 4 ||
-        !ns_write_u16_le(fp, (uint16_t)IMG_NOISE_VERSION) ||
+        !ns_write_u16_le(fp, version) ||
         !ns_write_u16_le(fp, flags) ||
         !ns_write_u32_le(fp, (uint32_t)IMG_CE_TOTAL) ||
         !ns_write_u32_le(fp, global_off) ||
@@ -643,7 +658,11 @@ int img_noise_memory_load(ImgNoiseMemory* nmem, const char* path) {
         !ns_read_u32_le(fp, &retrieval_off)) {
         fclose(fp); return 0;
     }
-    if (version != IMG_NOISE_VERSION) { fclose(fp); return 0; }
+    /* Accept V1 and V2. V2 uses the MSBs of tags0/tags1 to carry a
+     * 2-bit level code; CE reconstruction masks those bits off so a
+     * V2-loaded sample rebuilds the same ImgCECell as its V1 form. */
+    if (version != IMG_NOISE_VERSION &&
+        version != IMG_NOISE_VERSION_V2) { fclose(fp); return 0; }
     if (cell_count != IMG_CE_TOTAL)   { fclose(fp); return 0; }
 
     /* Reset to a clean state, but keep any existing label heap; we
