@@ -33,9 +33,9 @@ typedef struct ImgRegion {
     uint32_t cell_count;     /* number of cells in the region */
     uint32_t cells_offset;   /* index into ImgRegionMap.cell_ids */
     uint8_t  dominant_role;  /* majority-vote ImgSemanticRole */
-    uint8_t  dominant_tier;  /* majority-vote depth_class */
-    uint8_t  level;          /* 0..3; Phase B infers from tier/size */
-    uint8_t  reserved;
+    uint8_t  dominant_depth; /* majority-vote depth_class */
+    uint8_t  dominant_flow;  /* majority-vote direction_class */
+    uint8_t  level;          /* 0..3; Phase B fills via img_level_infer */
 } ImgRegion;
 
 /* A partition of all IMG_CE_TOTAL cells into disjoint regions. */

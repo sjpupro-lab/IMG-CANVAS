@@ -1,4 +1,5 @@
 #include "img_region.h"
+#include "img_level.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -98,7 +99,8 @@ int img_region_map_extract(const ImgCEGrid* grid,
                            img_region_map_free(out); return 0; }
 
     const size_t OFF_ROLE = (size_t)&(((ImgCECell*)0)->semantic_role);
-    const size_t OFF_TIER = (size_t)&(((ImgCECell*)0)->depth_class);
+    const size_t OFF_DEPTH = (size_t)&(((ImgCECell*)0)->depth_class);
+    const size_t OFF_FLOW  = (size_t)&(((ImgCECell*)0)->direction_class);
 
     for (uint32_t seed = 0; seed < N; seed++) {
         if (seen[seed]) continue;
@@ -149,10 +151,15 @@ int img_region_map_extract(const ImgCEGrid* grid,
         r.dominant_role  = majority_u8(grid, out->cell_ids,
                                        r.cells_offset, r.cell_count,
                                        OFF_ROLE);
-        r.dominant_tier  = majority_u8(grid, out->cell_ids,
+        r.dominant_depth = majority_u8(grid, out->cell_ids,
                                        r.cells_offset, r.cell_count,
-                                       OFF_TIER);
-        r.level          = 0;  /* Phase B: infer_level(tier, count) */
+                                       OFF_DEPTH);
+        r.dominant_flow  = majority_u8(grid, out->cell_ids,
+                                       r.cells_offset, r.cell_count,
+                                       OFF_FLOW);
+        r.level          = img_level_infer_from_region(
+                               r.dominant_depth, r.dominant_flow,
+                               band_hi, r.cell_count);
 
         if (!region_map_push_region(out, &r)) goto fail;
     }
